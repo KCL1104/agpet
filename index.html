@@ -12,19 +12,30 @@
 
     <div id="chat-panel" class="hidden">
       <div class="chat-header">
-        <span id="chat-title">Claude Code</span>
+        <div class="chat-title-wrap">
+          <span class="pet-avatar">🐾</span>
+          <div class="title-lines">
+            <span id="chat-title">Claude Code</span>
+            <span id="chat-substatus"><span id="status-dot"></span><span id="status-text">connecting…</span></span>
+          </div>
+        </div>
         <div class="chat-header-actions">
           <button id="chat-new" title="End &amp; summarize, start a new session">＋ New</button>
           <button id="chat-history" title="Past sessions">History</button>
           <button id="chat-close" title="Close">×</button>
         </div>
       </div>
-      <div id="chat-messages"></div>
+      <div id="chat-messages">
+        <div id="chat-empty" class="chat-empty">
+          <div class="empty-emoji">🐾</div>
+          <div>Ask Claude anything.<br />I'll remember our chats across sessions.</div>
+        </div>
+      </div>
       <div id="history-view" class="hidden"></div>
       <div id="permission-bar" class="hidden"></div>
       <div class="chat-input-row">
-        <textarea id="chat-input" rows="2" placeholder="Ask Claude…  (Enter to send, Shift+Enter for newline)"></textarea>
-        <button id="chat-send">Send</button>
+        <textarea id="chat-input" rows="1" placeholder="Message Claude…  (Enter to send)"></textarea>
+        <button id="chat-send" title="Send">➤</button>
       </div>
     </div>
   </body>

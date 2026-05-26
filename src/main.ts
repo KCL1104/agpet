@@ -64,6 +64,15 @@ const permBar = document.getElementById("permission-bar") as HTMLDivElement;
 const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
 const historyBtn = document.getElementById("chat-history") as HTMLButtonElement;
 const historyView = document.getElementById("history-view") as HTMLDivElement;
+const chatEmpty = document.getElementById("chat-empty") as HTMLDivElement;
+const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
+const statusText = document.getElementById("status-text") as HTMLSpanElement;
+
+// Show the friendly placeholder only when there are no messages/tool chips.
+function updateEmpty() {
+  const hasContent = messagesEl.querySelector(".msg, .tool");
+  chatEmpty.style.display = hasContent ? "none" : "flex";
+}
 
 // Streaming targets for the current agent turn.
 let currentAgent: HTMLDivElement | null = null;
@@ -79,6 +88,7 @@ function addMessage(cls: string, text: string): HTMLDivElement {
   div.className = `msg ${cls}`;
   div.textContent = text;
   messagesEl.appendChild(div);
+  updateEmpty();
   scrollToBottom();
   return div;
 }
@@ -129,11 +139,13 @@ interface SessionRow {
 }
 
 function clearTranscript() {
-  messagesEl.innerHTML = "";
+  // Remove messages/tool chips but keep the empty-state node.
+  messagesEl.querySelectorAll(".msg, .tool").forEach((n) => n.remove());
   permBar.classList.add("hidden");
   permBar.innerHTML = "";
   resetTurn();
   toolChips.clear();
+  updateEmpty();
 }
 
 async function loadHistory() {
@@ -210,6 +222,10 @@ listen<PetStatePayload>("pet-state", (event) => {
     revertToIdleAt = performance.now() + 2200;
     resetTurn();
   }
+  // Reflect state in the panel header status dot.
+  const st = STATE_STYLE[petState] ?? STATE_STYLE.idle;
+  if (statusDot) statusDot.style.background = st.color;
+  if (statusText) statusText.textContent = stateDetail ? `${st.label} · ${stateDetail}` : st.label;
 });
 
 interface ChatEvent {
@@ -255,6 +271,7 @@ listen<ChatEvent>("chat-event", (event) => {
       chip.innerHTML = `🔧 <span class="name"></span> <span class="badge"></span>`;
       chip.querySelector(".name")!.textContent = title;
       chip.querySelector(".badge")!.textContent = ev.status ?? "running";
+      updateEmpty();
       scrollToBottom();
       break;
     }
