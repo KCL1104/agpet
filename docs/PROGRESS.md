@@ -169,8 +169,21 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **驗證**（使用者實測）：開 Claude + Codex（同夾）→ Run plan-then-execute → Claude 規劃 → 📦→ Codex 執行 → 📦→ Claude 審查；**交接動畫 + 輸出串接正常**。
 - 缺對應型別寵物時提示「Launch a {type} first」。
 
-## 之後（待續）
+## 下一步（新對話接手）：做 1 + 2
 
-- M3 Slice 2b：可編輯 YAML workflow（從 config 載入多個）、步驟間同檔衝突鎖。
+### 1) M3 Slice 2b — 可編輯 YAML workflow
+- 加 YAML crate（`serde_yaml` 或 `serde_yml`）。在 `acp/workflow.rs` 把 `builtins()` 擴成 `load_all(app)`：讀 `app_config_dir()/workflows/*.yaml`（不存在則寫一份 `plan-then-execute.yaml` 範例），parse 成既有 `Workflow`/`WorkflowStep`（欄位：id/name/required_types/steps[agent_type,prompt,output_var]），與內建合併。
+- `list_workflows`/`run_workflow` 已是 config 驅動，前端 workflow 面板自動列出多個，無需大改。
+- （進階、可選）步驟間「同檔衝突鎖」：第二個 workflow 要動同檔時等第一個完成。
+
+### 2) 打磨清單
+- **thinking 存 history**：`acp/client.rs` 的 `record_update` 目前只存 tool_call/agent_message；加存 `agent_thought_chunk`（event_type `thinking`）。
+- **adapter 套件更名**：`agents.toml` 預設把 `@zed-industries/claude-code-acp` → `@agentclientprotocol/claude-agent-acp`（注意：只改 `config.rs` 預設；既有 `AppData\Roaming\com.agpet.pet\agents.toml` 需手動更新或刪檔重生）。
+- **Antigravity CLI**：先確認其 ACP stdio 指令（docs 未明朗；Gemini CLI 是 `gemini --experimental-acp`），確認後加進 `config.rs` 預設 + agents.toml。
+- **多寵物排版**：lane 已避免身體重疊；可再微調 label 重疊、或可拖動寵物位置。
+
+> 接手提示：架構已成熟 —— 加 agent = 改 `agents.toml`（config-only）；加 workflow = Slice 2b 後改 YAML；事件/指令皆以 `instance_id` 為鍵、DB 以 `type_id`。關鍵檔案見各里程碑「關鍵檔案」段。最近 3 個 commit 仍為本機，需 `git push`。
+
+## 更後面（暫不做）
 - M4：跨機器團隊（feature B，spec 標延後/可能不做）。
-- 其他：`sysinfo`/WSL 外部 session 偵測；Antigravity CLI 接入；adapter 套件更名（claude-code-acp→claude-agent-acp）；多寵物排版微調。
+- `sysinfo`/WSL 外部 session 偵測（M1 步驟 5–6，當初列為可選）。
