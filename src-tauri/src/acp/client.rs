@@ -90,6 +90,9 @@ pub fn start(
 
     let current_db_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let turn_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    // Accumulates agent_thought_chunk text for the current turn (stored once at
+    // turn end as a single `thinking` event, mirroring `turn_text`/agent_message).
+    let thought_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let pending_context: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     tauri::async_runtime::spawn(async move {
@@ -123,6 +126,8 @@ pub fn start(
         let cur_id_main = current_db_id.clone();
         let turn_notif = turn_text.clone();
         let turn_main = turn_text.clone();
+        let thought_notif = thought_text.clone();
+        let thought_main = thought_text.clone();
         let ctx_main = pending_context.clone();
         let cfg_main = agent_cfg.clone();
 
@@ -140,7 +145,7 @@ pub fn start(
                         }
                         let _ = app_notif.emit(CHAT_EVENT, ev);
                     }
-                    record_update(&notification, &db_notif, &cur_id_notif, &turn_notif).await;
+                    record_update(&notification, &db_notif, &cur_id_notif, &turn_notif, &thought_notif).await;
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -261,15 +266,11 @@ pub fn start(
                                 let _ = db_main.append_event(&id, "user_message", &json!({"text": text}).to_string()).await;
                             }
                             if let Ok(mut t) = turn_main.lock() { t.clear(); }
+                            if let Ok(mut t) = thought_main.lock() { t.clear(); }
                             let req = PromptRequest::new(acp_session.clone(), vec![ContentBlock::Text(TextContent::new(full_text))]);
                             match conn.send_request(req).block_task().await {
                                 Ok(_) => {
-                                    let agent_text = turn_main.lock().map(|t| t.clone()).unwrap_or_default();
-                                    if !agent_text.is_empty() {
-                                        if let Some(id) = cur_id(&cur_id_main) {
-                                            let _ = db_main.append_event(&id, "agent_message", &json!({"text": agent_text}).to_string()).await;
-                                        }
-                                    }
+                                    record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
                                     emit_state(&app_main, &iid_main, "completed", None);
                                 }
                                 Err(e) => {
@@ -305,6 +306,7 @@ pub fn start(
                         }
                         AcpCommand::RunStep { text, reply } => {
                             if let Ok(mut t) = turn_main.lock() { t.clear(); }
+                            if let Ok(mut t) = thought_main.lock() { t.clear(); }
                             if let Some(id) = cur_id(&cur_id_main) {
                                 let _ = db_main.set_initial_prompt(&id, &text).await;
                                 let _ = db_main.append_event(&id, "user_message", &json!({"text": text}).to_string()).await;
@@ -312,12 +314,7 @@ pub fn start(
                             let req = PromptRequest::new(acp_session.clone(), vec![ContentBlock::Text(TextContent::new(text))]);
                             match conn.send_request(req).block_task().await {
                                 Ok(_) => {
-                                    let agent_text = turn_main.lock().map(|t| t.clone()).unwrap_or_default();
-                                    if !agent_text.is_empty() {
-                                        if let Some(id) = cur_id(&cur_id_main) {
-                                            let _ = db_main.append_event(&id, "agent_message", &json!({"text": agent_text}).to_string()).await;
-                                        }
-                                    }
+                                    let agent_text = record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
                                     emit_state(&app_main, &iid_main, "completed", None);
                                     let _ = reply.send(Ok(agent_text));
                                 }
@@ -429,11 +426,34 @@ async fn open_session(
     Some((acp, db_id))
 }
 
+/// Persist a finished turn: the accumulated thinking (if any), then the agent
+/// message (if any). Thinking is written first so its DB timestamp precedes the
+/// reply. Returns the agent message text (used as a workflow step's output).
+async fn record_turn(
+    db: &Db,
+    cur_id_state: &Arc<Mutex<Option<String>>>,
+    turn_text: &Arc<Mutex<String>>,
+    thought_text: &Arc<Mutex<String>>,
+) -> String {
+    let thoughts = thought_text.lock().map(|t| t.clone()).unwrap_or_default();
+    let agent_text = turn_text.lock().map(|t| t.clone()).unwrap_or_default();
+    if let Some(id) = cur_id(cur_id_state) {
+        if !thoughts.is_empty() {
+            let _ = db.append_event(&id, "thinking", &json!({ "text": thoughts }).to_string()).await;
+        }
+        if !agent_text.is_empty() {
+            let _ = db.append_event(&id, "agent_message", &json!({ "text": agent_text }).to_string()).await;
+        }
+    }
+    agent_text
+}
+
 async fn record_update(
     notification: &SessionNotification,
     db: &Db,
     cur_id_state: &Arc<Mutex<Option<String>>>,
     turn_text: &Arc<Mutex<String>>,
+    thought_text: &Arc<Mutex<String>>,
 ) {
     let Ok(v) = serde_json::to_value(notification) else { return };
     let Some(update) = v.get("update") else { return };
@@ -442,6 +462,13 @@ async fn record_update(
     if kind == "agent_message_chunk" {
         if let Some(text) = update.get("content").and_then(extract_text) {
             if let Ok(mut t) = turn_text.lock() {
+                t.push_str(&text);
+            }
+        }
+    }
+    if kind == "agent_thought_chunk" {
+        if let Some(text) = update.get("content").and_then(extract_text) {
+            if let Ok(mut t) = thought_text.lock() {
                 t.push_str(&text);
             }
         }

@@ -35,6 +35,9 @@ pub struct PetRectInput {
 pub struct OverlayState {
     pub pet_rects: Mutex<HashMap<String, PetRect>>,
     pub panel_open: AtomicBool,
+    /// True while the user is dragging a pet. Forces the window interactive so a
+    /// fast drag can't outrun the (33ms-stale) pet rect and flip click-through on.
+    pub dragging: AtomicBool,
 }
 
 impl OverlayState {
@@ -42,6 +45,7 @@ impl OverlayState {
         Self {
             pet_rects: Mutex::new(HashMap::new()),
             panel_open: AtomicBool::new(false),
+            dragging: AtomicBool::new(false),
         }
     }
 
@@ -72,8 +76,9 @@ pub fn spawn_clickthrough_loop(app: AppHandle) {
             std::thread::sleep(Duration::from_millis(33));
             let state = app.state::<OverlayState>();
             let panel_open = state.panel_open.load(Ordering::Relaxed);
-            let over_pet = !panel_open && cursor_over_any_pet(&window, &state);
-            let desired_ignore = !(panel_open || over_pet);
+            let dragging = state.dragging.load(Ordering::Relaxed);
+            let over_pet = !panel_open && !dragging && cursor_over_any_pet(&window, &state);
+            let desired_ignore = !(panel_open || dragging || over_pet);
             if desired_ignore != current_ignore {
                 match window.set_ignore_cursor_events(desired_ignore) {
                     Ok(()) => current_ignore = desired_ignore,

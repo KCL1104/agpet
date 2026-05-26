@@ -169,20 +169,31 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **驗證**（使用者實測）：開 Claude + Codex（同夾）→ Run plan-then-execute → Claude 規劃 → 📦→ Codex 執行 → 📦→ Claude 審查；**交接動畫 + 輸出串接正常**。
 - 缺對應型別寵物時提示「Launch a {type} first」。
 
-## 下一步（新對話接手）：做 1 + 2
+## Milestone 3 — Slice 2b（可編輯 YAML workflow）✅ 完成（待目視驗證）
 
-### 1) M3 Slice 2b — 可編輯 YAML workflow
-- 加 YAML crate（`serde_yaml` 或 `serde_yml`）。在 `acp/workflow.rs` 把 `builtins()` 擴成 `load_all(app)`：讀 `app_config_dir()/workflows/*.yaml`（不存在則寫一份 `plan-then-execute.yaml` 範例），parse 成既有 `Workflow`/`WorkflowStep`（欄位：id/name/required_types/steps[agent_type,prompt,output_var]），與內建合併。
-- `list_workflows`/`run_workflow` 已是 config 驅動，前端 workflow 面板自動列出多個，無需大改。
-- （進階、可選）步驟間「同檔衝突鎖」：第二個 workflow 要動同檔時等第一個完成。
+- **YAML crate**：`Cargo.toml` 加 `serde_yaml = "0.9"`（archived 但穩定；`serde_yml` 為備選 fork）。
+- **`acp/workflow.rs`**：`Workflow`/`WorkflowStep` 加 `Deserialize`；`steps` 改 `#[serde(default, skip_serializing)]`（**能從 YAML 反序列化、但不送前端**，`list_workflows` payload 維持精簡）；`required_types` 設 `#[serde(default)]`。新增 `load_all(app)`：從 `builtins()` 起步 → 讀 `app_config_dir()/workflows/*.yaml|*.yml`（資料夾不存在則建立並寫範例 `plan-then-execute.yaml`，內容存於 `EXAMPLE_WORKFLOW_YAML` 常數）→ 逐檔 `serde_yaml::from_str`（**parse/read 失敗只 warn 跳過該檔**，不弄垮整張清單）→ `required_types` 為空時由 steps 的相異 `agent_type` 推導 → **以 `id` 去重**（YAML 同 id 覆蓋內建，所以範例檔可被編輯來覆寫預設）。
+- **`acp/mod.rs`**：`list_workflows`/`run_workflow` 改呼叫 `workflow::load_all(&self.app)`（`AcpManager` 已持 `app`，**毋需改 `new()` 或 `lib.rs` setup**）。按需載入 → **編輯/新增 YAML 下次開面板即生效，免重啟**。
+- commands/tray/前端 workflow 面板早已是動態清單驅動，多個 workflow 自動列出，**前端零改動**。
+- **編譯**：`cargo check` 通過。**待使用者目視驗證**：首啟生成範例檔且面板只列一筆（去重）、加第二個 YAML 重開面板即現、壞 YAML 被跳過、plan-then-execute 仍可跑（交接動畫/串接回歸）。
 
-### 2) 打磨清單
-- **thinking 存 history**：`acp/client.rs` 的 `record_update` 目前只存 tool_call/agent_message；加存 `agent_thought_chunk`（event_type `thinking`）。
-- **adapter 套件更名**：`agents.toml` 預設把 `@zed-industries/claude-code-acp` → `@agentclientprotocol/claude-agent-acp`（注意：只改 `config.rs` 預設；既有 `AppData\Roaming\com.agpet.pet\agents.toml` 需手動更新或刪檔重生）。
-- **Antigravity CLI**：先確認其 ACP stdio 指令（docs 未明朗；Gemini CLI 是 `gemini --experimental-acp`），確認後加進 `config.rs` 預設 + agents.toml。
-- **多寵物排版**：lane 已避免身體重疊；可再微調 label 重疊、或可拖動寵物位置。
+## 打磨批次 2 ✅ 完成（待目視驗證）
 
-> 接手提示：架構已成熟 —— 加 agent = 改 `agents.toml`（config-only）；加 workflow = Slice 2b 後改 YAML；事件/指令皆以 `instance_id` 為鍵、DB 以 `type_id`。關鍵檔案見各里程碑「關鍵檔案」段。最近 3 個 commit 仍為本機，需 `git push`。
+- **thinking 存 history**（`acp/client.rs`）：新增每回合 thought 緩衝 `thought_text`（仿 `turn_text`），`record_update` 累積 `agent_thought_chunk`；回合結束由新 helper `record_turn()` **先寫 `thinking` 事件、再寫 `agent_message`**（時間戳自然排序，thinking 在前），**每回合一筆**而非每 chunk 一筆。`RunStep` 仍由 `record_turn` 回傳 agent 全文供 workflow 串接。
+- **adapter 套件更名**：`config.rs` 把 claude 預設 `@zed-industries/claude-code-acp`（v0.16.2）→ `@agentclientprotocol/claude-agent-acp`（**npm 實測 v0.37.0，存在且較新**），`default_agents()` 與 `DEFAULT_AGENTS_TOML` 兩處都改。⚠️ **只影響新安裝**：既有 `AppData\Roaming\com.agpet.pet\agents.toml` 仍是舊名，**需手動把該行改成新套件名、或刪檔讓它重生**（不自動覆寫使用者已編輯的 config）。
+- **可拖動寵物 + label 防重疊**（前端 + overlay 小改）：
+  - `overlay.rs` 加 `dragging: AtomicBool`；clickthrough 迴圈 `desired_ignore = !(panel_open || dragging || over_pet)`。`lib.rs` 加 `set_dragging` command。**避免快速拖曳時游標跑出 33ms 過期的 pet 矩形而誤觸穿透**。
+  - `main.ts`：`Pet` 加 `pinned`；`drawPet` 對 pinned 寵物略過 lane/走動、僅夾在畫面內；click handler 改成 mousedown/move/up —— 超過 4px 視為拖曳（pin 到放開處、不走動），未超過視為點擊（開面板）。
+  - **label 防重疊**：label 改第二趟 `drawLabels()` 繪製，依 x 排序、與已放置 label 重疊時上移一列，避免名稱互蓋。
+  - **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：拖曳順手不掉穿透、放開停住、輕點仍開面板、寵物聚集時 label 可讀。
+
+## 下一步（新對話接手）
+
+- **Antigravity CLI**（本批延後）：先確認其 ACP stdio 指令（docs 未明朗；Gemini CLI 是 `gemini --experimental-acp`），確認後加進 `config.rs` 預設 + agents.toml（config-only）。
+- （進階、可選）workflow 步驟間「同檔衝突鎖」：第二個 workflow 要動同檔時等第一個完成。
+- 拖動位置**跨重啟不保留**（instance id 每次重生）—— 若要保留需改用穩定鍵持久化。
+
+> 接手提示：架構已成熟 —— 加 agent = 改 `agents.toml`（config-only）；加 workflow = 在 `app_config_dir()/workflows/` 丟一個 `*.yaml`（同 id 覆蓋內建，免重啟）；事件/指令皆以 `instance_id` 為鍵、DB 以 `type_id`。關鍵檔案見各里程碑「關鍵檔案」段。本批 + 先前 commit 仍為本機，需 `git push`。
 
 ## 更後面（暫不做）
 - M4：跨機器團隊（feature B，spec 標延後/可能不做）。

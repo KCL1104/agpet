@@ -34,6 +34,7 @@ interface Pet {
   color: string;
   x: number;
   dir: 1 | -1;
+  pinned: boolean; // true once the user drags it; stops lane-walking, stays put
   state: string;
   detail: string;
   revertAt: number;
@@ -603,6 +604,7 @@ function addPet(info: InstanceInfo) {
     color: info.color,
     x: -1, // assigned by layoutPets
     dir: pets.length % 2 === 0 ? 1 : -1,
+    pinned: false,
     state: "connecting",
     detail: "",
     revertAt: 0,
@@ -816,7 +818,9 @@ function shade(hex: string, amt: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, count: number) {
+interface LabelReq { text: string; cx: number; top: number; selected: boolean }
+
+function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, count: number): LabelReq {
   if (pet.state === "completed" && now >= pet.revertAt) {
     pet.state = "idle";
     pet.detail = "";
@@ -825,19 +829,24 @@ function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, coun
   const m = meta(pet.state);
   const dim = pet.state === "error" || pet.state === "exited" || pet.state === "auth_required";
 
-  // Each pet roams its own horizontal lane so they don't pile up.
-  const laneW = w / Math.max(1, count);
-  const minX = idx * laneW + 4;
-  const maxX = idx * laneW + laneW - PET_W - 4;
-  if (maxX <= minX) {
-    pet.x = idx * laneW + Math.max(0, (laneW - PET_W) / 2);
+  if (pet.pinned) {
+    // Dragged pets stay where dropped — no lane, no walking. Just keep on-screen.
+    pet.x = Math.max(0, Math.min(w - PET_W, pet.x));
   } else {
-    if (pet.x < minX) pet.x = minX;
-    if (pet.x > maxX) pet.x = maxX;
-    if (m.walk) {
-      pet.x += pet.dir * SPEED * dt;
-      if (pet.x <= minX) { pet.x = minX; pet.dir = 1; }
-      else if (pet.x >= maxX) { pet.x = maxX; pet.dir = -1; }
+    // Each pet roams its own horizontal lane so they don't pile up.
+    const laneW = w / Math.max(1, count);
+    const minX = idx * laneW + 4;
+    const maxX = idx * laneW + laneW - PET_W - 4;
+    if (maxX <= minX) {
+      pet.x = idx * laneW + Math.max(0, (laneW - PET_W) / 2);
+    } else {
+      if (pet.x < minX) pet.x = minX;
+      if (pet.x > maxX) pet.x = maxX;
+      if (m.walk) {
+        pet.x += pet.dir * SPEED * dt;
+        if (pet.x <= minX) { pet.x = minX; pet.dir = 1; }
+        else if (pet.x >= maxX) { pet.x = maxX; pet.dir = -1; }
+      }
     }
   }
 
@@ -873,15 +882,38 @@ function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, coun
   }
 
   const label = m.label ? `${pet.name} · ${m.label}` : pet.name;
+  // Labels are drawn in a second pass (drawLabels) so clustered pets don't
+  // overprint each other's names.
+  return { text: label, cx: pet.x + PET_W / 2, top: y + PET_H + 14, selected: pet.id === selected };
+}
+
+const LABEL_H = 18;
+/// Draw pet labels, nudging any that would overlap an already-placed one upward.
+function drawLabels(reqs: LabelReq[]) {
   ctx.font = "12px system-ui, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  const labelW = ctx.measureText(label).width + 14;
-  ctx.fillStyle = pet.id === selected ? "rgba(244,121,59,0.85)" : "rgba(0,0,0,0.55)";
-  roundRect(ctx, pet.x + PET_W / 2 - labelW / 2, y + PET_H + 14, labelW, 18, 9);
-  ctx.fill();
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText(label, pet.x + PET_W / 2, y + PET_H + 17);
+  const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
+  // Place left-to-right for stable stacking.
+  for (const r of [...reqs].sort((a, b) => a.cx - b.cx)) {
+    const lw = ctx.measureText(r.text).width + 14;
+    const x0 = r.cx - lw / 2;
+    const x1 = r.cx + lw / 2;
+    let top = r.top;
+    let guard = 0;
+    while (
+      guard++ < 24 &&
+      placed.some((p) => x0 < p.x1 && x1 > p.x0 && top < p.y1 + 2 && top + LABEL_H > p.y0 - 2)
+    ) {
+      top -= LABEL_H + 3;
+    }
+    placed.push({ x0, x1, y0: top, y1: top + LABEL_H });
+    ctx.fillStyle = r.selected ? "rgba(244,121,59,0.85)" : "rgba(0,0,0,0.55)";
+    roundRect(ctx, x0, top, lw, LABEL_H, 9);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(r.text, r.cx, top + 3);
+  }
 }
 
 function draw(now: number) {
@@ -889,7 +921,8 @@ function draw(now: number) {
   last = now;
   const w = window.innerWidth;
   ctx.clearRect(0, 0, w, window.innerHeight);
-  pets.forEach((pet, i) => drawPet(pet, now, dt, w, i, pets.length));
+  const labels = pets.map((pet, i) => drawPet(pet, now, dt, w, i, pets.length));
+  drawLabels(labels);
   drawHandoffs(now);
   reportRects(now);
   requestAnimationFrame(draw);
@@ -913,14 +946,42 @@ function drawHandoffs(now: number) {
   }
 }
 
-canvas.addEventListener("click", (e) => {
+// Pointer drag: a press that moves past the threshold pins the pet to where it's
+// dropped; a press that barely moves is treated as a click that opens the panel.
+const DRAG_THRESHOLD = 4;
+let drag: { pet: Pet; offsetX: number; startX: number; startY: number; moved: boolean } | null = null;
+
+canvas.addEventListener("mousedown", (e) => {
   for (const pet of pets) {
     const b = petBox(pet);
     if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
-      openPanelFor(pet.id);
+      drag = { pet, offsetX: e.clientX - pet.x, startX: e.clientX, startY: e.clientY, moved: false };
+      // Keep the window interactive for the whole drag, even if the cursor
+      // briefly outruns the pet's (33ms-stale) hit rect.
+      invoke("set_dragging", { dragging: true }).catch(() => {});
+      e.preventDefault();
       return;
     }
   }
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > DRAG_THRESHOLD) {
+    drag.moved = true;
+  }
+  if (drag.moved) {
+    drag.pet.pinned = true;
+    drag.pet.x = Math.max(0, Math.min(window.innerWidth - PET_W, e.clientX - drag.offsetX));
+  }
+});
+
+window.addEventListener("mouseup", () => {
+  if (!drag) return;
+  const { pet, moved } = drag;
+  drag = null;
+  invoke("set_dragging", { dragging: false }).catch(() => {});
+  if (!moved) openPanelFor(pet.id); // a click, not a drag
 });
 
 async function init() {

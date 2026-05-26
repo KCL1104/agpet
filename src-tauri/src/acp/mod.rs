@@ -328,12 +328,12 @@ impl AcpManager {
     }
 
     pub fn list_workflows(&self) -> Vec<Workflow> {
-        workflow::builtins()
+        workflow::load_all(&self.app)
     }
 
     /// Start a workflow run (spawns a router task that drives the steps).
     pub fn run_workflow(&self, workflow_id: &str, user_input: String) -> Result<(), String> {
-        let wf = workflow::builtins()
+        let wf = workflow::load_all(&self.app)
             .into_iter()
             .find(|w| w.id == workflow_id)
             .ok_or_else(|| format!("unknown workflow: {workflow_id}"))?;

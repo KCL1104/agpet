@@ -90,7 +90,7 @@ fn default_agents() -> Vec<AgentDef> {
             id: "claude".into(),
             name: "Claude Code".into(),
             command: "npx".into(),
-            args: vec!["-y".into(), "@zed-industries/claude-code-acp".into()],
+            args: vec!["-y".into(), "@agentclientprotocol/claude-agent-acp".into()],
             color: "#da7756".into(),
         },
         AgentDef {
@@ -132,7 +132,7 @@ const DEFAULT_AGENTS_TOML: &str = r##"# agpet agents — one pet per agent. Edit
 id = "claude"
 name = "Claude Code"
 command = "npx"
-args = ["-y", "@zed-industries/claude-code-acp"]
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
 color = "#da7756"
 
 [[agent]]
