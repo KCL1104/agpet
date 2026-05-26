@@ -1442,6 +1442,7 @@ function openPanelRects() {
     ["__panel:launcher", launcherPanel],
     ["__panel:workflow", workflowPanel],
     ["__panel:worktree", worktreePanel],
+    ["__panel:petmenu", petMenu],
   ];
   return panels
     .filter(([, el]) => !el.classList.contains("hidden"))
@@ -1618,6 +1619,7 @@ const DRAG_THRESHOLD = 4;
 let drag: { pet: Pet; offsetX: number; offsetY: number; startX: number; startY: number; moved: boolean } | null = null;
 
 canvas.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return; // let right-click fall through to the context menu
   for (const pet of pets) {
     const b = petBox(pet);
     if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
@@ -1667,6 +1669,81 @@ canvas.addEventListener("dblclick", (e) => {
       return;
     }
   }
+});
+
+// --- Pet right-click context menu -----------------------------------------
+// The webview's native menu (Save image / Inspect) is unwanted on a pet
+// overlay, so right-clicking a pet shows our own menu instead.
+const petMenu = document.createElement("div");
+petMenu.className = "pet-menu hidden";
+document.body.appendChild(petMenu);
+
+function hidePetMenu() {
+  petMenu.classList.add("hidden");
+}
+
+function beginRenameInMenu(pet: Pet) {
+  petMenu.innerHTML = "";
+  const input = document.createElement("input");
+  input.className = "pet-menu-input";
+  input.value = pet.name;
+  petMenu.appendChild(input);
+  input.focus();
+  input.select();
+  const commit = (save: boolean) => {
+    if (save) renamePet(pet, input.value);
+    hidePetMenu();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  });
+  input.addEventListener("blur", () => commit(true));
+}
+
+function showPetMenu(pet: Pet, x: number, y: number) {
+  petMenu.innerHTML = "";
+  const items: { label: string; danger?: boolean; run: () => void }[] = [
+    { label: "Open prompt window", run: () => openPanelFor(pet.id) },
+    { label: "Change session name", run: () => beginRenameInMenu(pet) },
+    { label: "Delete session", danger: true, run: () => {
+      invoke("close_instance", { instance: pet.id }).catch((err) => showToast(`Delete failed: ${err}`));
+    } },
+  ];
+  for (const it of items) {
+    const el = document.createElement("div");
+    el.className = "pet-menu-item" + (it.danger ? " danger" : "");
+    el.textContent = it.label;
+    el.addEventListener("click", () => {
+      const renames = it.label === "Change session name";
+      it.run();
+      if (!renames) hidePetMenu(); // rename keeps the menu open for its input
+    });
+    petMenu.appendChild(el);
+  }
+  petMenu.classList.remove("hidden");
+  // Clamp to the viewport so the menu never spills off-screen.
+  const r = petMenu.getBoundingClientRect();
+  petMenu.style.left = Math.min(x, window.innerWidth - r.width - 4) + "px";
+  petMenu.style.top = Math.min(y, window.innerHeight - r.height - 4) + "px";
+  lastRectSent = 0; // report the menu's interactive rect on the next frame
+}
+
+canvas.addEventListener("contextmenu", (e) => {
+  e.preventDefault(); // suppress the native webview menu everywhere on the canvas
+  for (const pet of pets) {
+    const b = petBox(pet);
+    if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
+      showPetMenu(pet, e.clientX, e.clientY);
+      return;
+    }
+  }
+  hidePetMenu();
+});
+
+// Dismiss the menu when interacting outside it.
+window.addEventListener("mousedown", (e) => {
+  if (!petMenu.contains(e.target as Node)) hidePetMenu();
 });
 
 async function init() {

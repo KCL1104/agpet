@@ -1094,3 +1094,52 @@ body {
   color: #fff;
   cursor: pointer;
 }
+
+/* Pet right-click context menu. */
+.pet-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 168px;
+  padding: 5px;
+  background: rgba(22, 24, 29, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(14px);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: #ececee;
+  animation: panel-in 0.12s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.pet-menu.hidden {
+  display: none;
+}
+.pet-menu-item {
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.pet-menu-item:hover {
+  background: var(--surface-2);
+}
+.pet-menu-item.danger {
+  color: #f08a7a;
+}
+.pet-menu-item.danger:hover {
+  background: rgba(224, 90, 70, 0.16);
+  color: #ff9a8a;
+}
+.pet-menu-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
