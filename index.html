@@ -10,6 +10,15 @@
   <body>
     <canvas id="pet-canvas"></canvas>
 
+    <div id="launcher-panel" class="hidden">
+      <div class="launcher-header">
+        <span>Launch an agent</span>
+        <button id="launcher-close" title="Close">×</button>
+      </div>
+      <div class="launcher-hint">Pick a working folder, then Launch. You can open several (even the same agent) in different folders.</div>
+      <div id="launcher-list"></div>
+    </div>
+
     <div id="chat-panel" class="hidden">
       <div class="chat-header">
         <div class="chat-title-wrap">

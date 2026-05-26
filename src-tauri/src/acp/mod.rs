@@ -66,6 +66,8 @@ struct Instance {
     type_id: String,
     name: String,
     color: String,
+    /// Working directory this instance's sessions run in.
+    cwd: PathBuf,
     status: Arc<Mutex<AcpStatus>>,
     cmd_tx: Option<mpsc::UnboundedSender<AcpCommand>>,
     pending: PendingPermissions,
@@ -96,22 +98,27 @@ impl AcpManager {
         }
     }
 
-    /// Launch one instance per declared type (initial pets).
+    /// Launch one instance per declared type (kept for a future startup set).
+    #[allow(dead_code)]
     pub fn launch_defaults(&self) {
         let ids: Vec<String> = self.defs.iter().map(|d| d.id.clone()).collect();
         for id in ids {
-            let _ = self.launch(&id);
+            let _ = self.launch(&id, None);
         }
     }
 
-    /// Launch a new instance of `type_id`. Returns its instance id.
-    pub fn launch(&self, type_id: &str) -> Result<String, String> {
+    /// Launch a new instance of `type_id` in `cwd` (or the default). Returns its id.
+    pub fn launch(&self, type_id: &str, cwd: Option<String>) -> Result<String, String> {
         let def = self
             .defs
             .iter()
             .find(|d| d.id == type_id)
             .ok_or_else(|| format!("unknown agent type: {type_id}"))?
             .clone();
+
+        let cwd_path = cwd
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.cwd.clone());
 
         let n = {
             let mut c = self.next_n.lock().unwrap();
@@ -133,6 +140,7 @@ impl AcpManager {
             type_id: type_id.to_string(),
             name: name.clone(),
             color: color.clone(),
+            cwd: cwd_path.clone(),
             status: status.clone(),
             cmd_tx: Some(cmd_tx),
             pending: pending.clone(),
@@ -145,7 +153,7 @@ impl AcpManager {
             instance_id.clone(),
             type_id.to_string(),
             def,
-            self.cwd.clone(),
+            cwd_path,
             log_path,
             status,
             cmd_rx,
@@ -176,7 +184,7 @@ impl AcpManager {
 
     /// Restart a (stopped/errored) instance's connection, keeping its id.
     pub fn retry(&self, instance_id: &str) -> Result<(), String> {
-        let (type_id, status, pending, cfg, cmd_rx) = {
+        let (type_id, cwd_path, status, pending, cfg, cmd_rx) = {
             let mut insts = self.instances.lock().unwrap();
             let inst = insts
                 .iter_mut()
@@ -189,6 +197,7 @@ impl AcpManager {
             }
             (
                 inst.type_id.clone(),
+                inst.cwd.clone(),
                 inst.status.clone(),
                 inst.pending.clone(),
                 inst.config.clone(),
@@ -207,7 +216,7 @@ impl AcpManager {
             instance_id.to_string(),
             type_id,
             def,
-            self.cwd.clone(),
+            cwd_path,
             log_path,
             status,
             cmd_rx,

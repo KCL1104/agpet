@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 const canvas = document.getElementById("pet-canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
@@ -86,6 +87,67 @@ const setDensitySeg = document.getElementById("set-density") as HTMLDivElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 const resizeHandle = document.getElementById("resize-handle") as HTMLDivElement;
 const headerEl = document.querySelector(".chat-header") as HTMLDivElement;
+const launcherPanel = document.getElementById("launcher-panel") as HTMLDivElement;
+const launcherClose = document.getElementById("launcher-close") as HTMLButtonElement;
+const launcherList = document.getElementById("launcher-list") as HTMLDivElement;
+
+// The window is interactive whenever the chat OR launcher panel is open.
+function updatePanelOpen() {
+  const open = !panel.classList.contains("hidden") || !launcherPanel.classList.contains("hidden");
+  invoke("set_panel_open", { open }).catch(() => {});
+}
+
+interface TypeInfo { type_id: string; name: string; color: string; }
+
+async function buildLauncher() {
+  let types: TypeInfo[] = [];
+  try {
+    types = await invoke<TypeInfo[]>("list_types");
+  } catch (e) {
+    console.error("list_types failed", e);
+  }
+  launcherList.innerHTML = "";
+  for (const t of types) {
+    const row = document.createElement("div");
+    row.className = "launch-row";
+    row.innerHTML =
+      `<span class="launch-dot"></span>` +
+      `<div class="launch-info"><div class="launch-name"></div><div class="launch-dir"></div></div>` +
+      `<button class="launch-folder">Folder…</button><button class="launch-go">Launch</button>`;
+    (row.querySelector(".launch-dot") as HTMLElement).style.background = t.color;
+    row.querySelector(".launch-name")!.textContent = t.name;
+    const dirEl = row.querySelector(".launch-dir") as HTMLElement;
+    let chosen = localStorage.getItem("agpet.cwd." + t.type_id) || localStorage.getItem("agpet.cwd.last") || "";
+    dirEl.textContent = chosen || "(default folder)";
+
+    row.querySelector(".launch-folder")!.addEventListener("click", async () => {
+      const sel = await openDialog({ directory: true, multiple: false, defaultPath: chosen || undefined });
+      if (typeof sel === "string") {
+        chosen = sel;
+        dirEl.textContent = sel;
+        localStorage.setItem("agpet.cwd." + t.type_id, sel);
+        localStorage.setItem("agpet.cwd.last", sel);
+      }
+    });
+    row.querySelector(".launch-go")!.addEventListener("click", () => {
+      invoke("launch_instance", { kind: t.type_id, cwd: chosen || null }).catch((e) => console.error(e));
+      hideLauncher();
+    });
+    launcherList.appendChild(row);
+  }
+}
+
+function hideLauncher() {
+  launcherPanel.classList.add("hidden");
+  updatePanelOpen();
+}
+
+launcherClose.addEventListener("click", hideLauncher);
+listen("open-launcher", () => {
+  buildLauncher();
+  launcherPanel.classList.remove("hidden");
+  updatePanelOpen();
+});
 
 // Theme the panel to the selected agent's brand colour.
 function applyTheme(color: string) {
@@ -342,13 +404,13 @@ function selectAgent(id: string) {
 function openPanelFor(id: string) {
   selectAgent(id);
   panel.classList.remove("hidden");
-  invoke("set_panel_open", { open: true }).catch(() => {});
+  updatePanelOpen();
   inputEl.focus();
 }
 
 function closePanel() {
   panel.classList.add("hidden");
-  invoke("set_panel_open", { open: false }).catch(() => {});
+  updatePanelOpen();
 }
 
 function sendPrompt() {

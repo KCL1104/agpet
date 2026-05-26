@@ -1,7 +1,8 @@
-//! System tray: launch new agent instances, close running ones, and quit.
+//! System tray: open the launcher (choose agent type + working dir), close
+//! running instances, and quit.
 //!
 //! Menu layout:
-//!   New ▸  (one item per agent type → launch a new instance)
+//!   Open Launcher…   (→ emits `open-launcher`; the frontend shows the launcher)
 //!   ──────
 //!   Close <instance name>  (one per running instance → stop its adapter)
 //!   ──────
@@ -9,9 +10,9 @@
 //!
 //! The menu is rebuilt after each launch/close so the running list stays current.
 
-use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::acp::AcpManager;
 
@@ -33,15 +34,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let manager = app.state::<AcpManager>();
 
-    // "New ▸" submenu: one launch item per agent type.
-    let new_items: Vec<MenuItem<R>> = manager
-        .list_types()
-        .into_iter()
-        .map(|t| MenuItem::with_id(app, format!("new:{}", t.type_id), &t.name, true, None::<&str>))
-        .collect::<tauri::Result<_>>()?;
-    let new_refs: Vec<&dyn IsMenuItem<R>> = new_items.iter().map(|i| i as &dyn IsMenuItem<R>).collect();
-    let new_sub = Submenu::with_items(app, "New ▸", true, &new_refs)?;
-
+    let launcher = MenuItem::with_id(app, "launcher", "Open Launcher…", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let close_items: Vec<MenuItem<R>> = manager
         .list_instances()
@@ -53,7 +46,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit agpet", true, None::<&str>)?;
 
-    let mut refs: Vec<&dyn IsMenuItem<R>> = vec![&new_sub, &sep1];
+    let mut refs: Vec<&dyn IsMenuItem<R>> = vec![&launcher, &sep1];
     for it in &close_items {
         refs.push(it as &dyn IsMenuItem<R>);
     }
@@ -62,7 +55,8 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     Menu::with_items(app, &refs)
 }
 
-fn rebuild<R: Runtime>(app: &AppHandle<R>) {
+/// Rebuild the tray menu (call after instances are launched/closed elsewhere).
+pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         if let Ok(menu) = build_menu(app) {
             let _ = tray.set_menu(Some(menu));
@@ -76,16 +70,15 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
         app.exit(0);
         return;
     }
-    let manager = app.state::<AcpManager>();
-    if let Some(type_id) = id.strip_prefix("new:") {
-        if let Err(e) = manager.launch(type_id) {
-            tracing::warn!("tray launch failed: {e}");
-        }
-        rebuild(app);
-    } else if let Some(instance_id) = id.strip_prefix("close:") {
+    if id == "launcher" {
+        let _ = app.emit("open-launcher", ());
+        return;
+    }
+    if let Some(instance_id) = id.strip_prefix("close:") {
+        let manager = app.state::<AcpManager>();
         if let Err(e) = manager.close(instance_id) {
             tracing::warn!("tray close failed: {e}");
         }
-        rebuild(app);
+        refresh(app);
     }
 }

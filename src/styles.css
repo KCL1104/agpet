@@ -15,6 +15,118 @@ body {
   display: block;
 }
 
+/* ===== Launcher panel =================================================== */
+
+#launcher-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 440px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(22, 24, 29, 0.97);
+  color: #ececee;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13.5px;
+}
+#launcher-panel.hidden {
+  display: none;
+}
+#launcher-panel:not(.hidden) {
+  animation: panel-in 0.18s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.launcher-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 15px;
+  font-weight: 650;
+  font-size: 15px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.launcher-header button {
+  background: transparent;
+  border: none;
+  color: #969ba6;
+  font-size: 19px;
+  cursor: pointer;
+}
+.launcher-header button:hover {
+  color: #fff;
+}
+.launcher-hint {
+  padding: 10px 15px 4px;
+  color: #969ba6;
+  font-size: 12px;
+}
+#launcher-list {
+  padding: 10px 12px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.launch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.launch-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.launch-info {
+  flex: 1;
+  min-width: 0;
+}
+.launch-name {
+  font-weight: 600;
+}
+.launch-dir {
+  font-size: 11px;
+  color: #969ba6;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.launch-folder,
+.launch-go {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ececee;
+  flex: 0 0 auto;
+}
+.launch-folder:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.launch-go {
+  background: #f4793b;
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+}
+.launch-go:hover {
+  filter: brightness(1.08);
+}
+
 /* ===== Chat panel ======================================================= */
 
 :root {

@@ -23,14 +23,27 @@ fn list_types(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::TypeInfo> {
 
 /// Launch a new instance of an agent type.
 #[tauri::command]
-fn launch_instance(kind: String, state: tauri::State<'_, acp::AcpManager>) -> Result<String, String> {
-    state.launch(&kind)
+fn launch_instance(
+    kind: String,
+    cwd: Option<String>,
+    state: tauri::State<'_, acp::AcpManager>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let id = state.launch(&kind, cwd)?;
+    tray::refresh(&app);
+    Ok(id)
 }
 
 /// Close (stop) an instance.
 #[tauri::command]
-fn close_instance(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.close(&instance)
+fn close_instance(
+    instance: String,
+    state: tauri::State<'_, acp::AcpManager>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    state.close(&instance)?;
+    tray::refresh(&app);
+    Ok(())
 }
 
 /// Reconnect a stopped/errored instance.
@@ -99,6 +112,7 @@ fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_instances,
             list_types,
@@ -144,7 +158,8 @@ pub fn run() {
                     &config,
                     app.handle().clone(),
                 );
-                manager.launch_defaults();
+                // Start with an empty desktop; the user launches instances (with a
+                // working dir) from the launcher panel via the tray.
                 app.manage(manager);
                 tray::build_tray(app.handle())?;
                 Ok(())

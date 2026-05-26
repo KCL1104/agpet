@@ -152,6 +152,14 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **驗證**：3 隻寵物各自起；Claude 連上、Codex 顯示 Retry 列、OpenCode offline；tray 多開「Claude Code 2」、Close、Quit、主題、⚙ 設定、拖曳/縮放皆 OK（使用者實測）。
 - 提醒：Codex 需登入（ChatGPT/Codex CLI 或 OPENAI_API_KEY）、OpenCode 需 `opencode` 在 PATH —— 屬使用者環境，非程式問題；面板 Retry 可在登入後免重啟重連。
 
+## 新增 agent 型別 + Launcher + per-instance cwd ✅ 完成並驗證
+
+- **加 Copilot + Gemini 型別**（config-only，M3 重構的紅利）：`agents.toml` 預設現有 5 型 —— claude / codex / opencode / **copilot**（`copilot --acp`）/ **gemini**（`gemini --experimental-acp`）；品牌色修正。Antigravity CLI 的 ACP 指令未明朗，待之後。
+- **開機空桌面**：移除 `launch_defaults` 開機呼叫，不再自動生成寵物。
+- **Launcher 面板**：tray 改成 **Open Launcher…**（emit `open-launcher`）；前端 launcher 面板列出所有型別，每個可用原生資料夾選擇器（`tauri-plugin-dialog`，`capabilities` 加 `dialog:allow-open`）選 **工作資料夾** 再 Launch；上次選的 cwd 記在 localStorage。
+- **每實例自己的 cwd**：`launch_instance(kind, cwd?)`；`Instance` 存 `cwd`，`client::start` + session/new + DB workdir + retry 都用它。**同型可在不同資料夾各開一隻、同時跑**。
+- **驗證**（使用者實測）：開機空桌面 → tray Open Launcher → 選資料夾 → 寵物在該目錄工作；可多開不同資料夾。
+
 ## 之後：Milestone 3 — Slice 2 + 其他
 
-Agent Router + workflow（plan-then-execute Claude→Codex）、交接動畫、可編輯 YAML workflow（Slice 2）；跨機器（M4）；`sysinfo`/WSL 外部 session 偵測 — 留待後續。
+Agent Router + workflow（plan-then-execute Claude→Codex）、交接動畫、可編輯 YAML workflow（Slice 2）；跨機器（M4）；`sysinfo`/WSL 外部 session 偵測；Antigravity CLI、adapter 套件更名 — 留待後續。
