@@ -1,4 +1,5 @@
 mod acp;
+mod db;
 mod overlay;
 
 use std::sync::atomic::Ordering;
@@ -47,6 +48,27 @@ fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
     state.panel_open.store(open, Ordering::Relaxed);
 }
 
+/// End + summarize the current session and open a fresh one.
+#[tauri::command]
+fn new_session(state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.new_session()
+}
+
+/// Open a fresh session seeded with a past session's summary (by DB id).
+#[tauri::command]
+fn resume_session(id: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.resume_session(id)
+}
+
+/// List recent persisted sessions for the history panel.
+#[tauri::command]
+async fn list_sessions(
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<Vec<db::SessionRow>, String> {
+    let db = state.db_handle();
+    db.list_sessions(50).await.map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -56,7 +78,10 @@ pub fn run() {
             send_prompt,
             respond_permission,
             update_pet_rect,
-            set_panel_open
+            set_panel_open,
+            new_session,
+            resume_session,
+            list_sessions
         ])
         .setup(|app| {
             let window = app
@@ -80,16 +105,29 @@ pub fn run() {
             app.manage(OverlayState::new());
             overlay::spawn_clickthrough_loop(app.handle().clone());
 
-            // ACP client: spawn claude-code-acp, run the handshake, stream
-            // session/update -> pet states + chat events, accept prompts.
-            // Failures are recorded in the manager status, never crashing the pet.
+            // ACP client + persistence: open the SQLite DB, then spawn
+            // claude-code-acp, run the handshake, stream session/update -> pet
+            // states + chat events, accept prompts, and persist sessions.
+            // Failures are logged and degrade gracefully (no crash).
             acp::logging::init();
-            let manager = acp::AcpManager::new();
-            match acp::AcpConfig::default_for(app.handle()) {
-                Ok(config) => manager.start(app.handle().clone(), config),
-                Err(e) => tracing::error!("ACP config error, adapter not started: {e:#}"),
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    let db_path = dir.join("agpet.db");
+                    match tauri::async_runtime::block_on(db::Db::init(&db_path)) {
+                        Ok(database) => {
+                            let manager = acp::AcpManager::new(std::sync::Arc::new(database));
+                            match acp::AcpConfig::default_for(app.handle()) {
+                                Ok(config) => manager.start(app.handle().clone(), config),
+                                Err(e) => tracing::error!("ACP config error, adapter not started: {e:#}"),
+                            }
+                            app.manage(manager);
+                            tracing::info!("session DB: {}", db_path.display());
+                        }
+                        Err(e) => tracing::error!("DB init failed, ACP disabled: {e:#}"),
+                    }
+                }
+                Err(e) => tracing::error!("app_data_dir failed, ACP disabled: {e}"),
             }
-            app.manage(manager);
 
             Ok(())
         })

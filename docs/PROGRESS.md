@@ -114,10 +114,29 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - adapter 套件 `@zed-industries/claude-code-acp` 已 deprecated → 之後可換 `@agentclientprotocol/claude-agent-acp`。
 - spec 步驟 5（`sysinfo` 偵測外部 session）、步驟 6（WSL 偵測）尚未做（M1 列為可選的延伸）。
 
-## 下一步：Milestone 2（Session handoff，feature D）
+## 🎉 Milestone 2 完成（Session handoff，feature D）
 
-加 SQLite（`sqlx`）存 session artifact、session 結束產生摘要、history 面板 + resume。詳見 [`acp-desktop-pet-spec.md`](./acp-desktop-pet-spec.md) Milestone 2。
+寵物有「記憶」了：每個 session 落地 SQLite、結束自動摘要、history 瀏覽、Resume 帶入摘要延續。
+
+### 做法
+- **DB 層**（`src-tauri/src/db.rs`）：`sqlx` + SQLite（vendored，靠 MSVC 編譯），`app_data_dir/agpet.db`（Windows：`AppData\Roaming\com.agpet.pet\agpet.db`）。三張表 `sessions` / `session_events` / `session_files`（UUID TEXT + unix ms，runtime query 不用編譯期巨集）。CRUD：create/set_initial_prompt/append_event/append_file/finish/list/get。
+- **Session 生命週期**（`acp/client.rs`）：維護可變的 current（acp session id + db uuid）；`AcpCommand` 加 `NewSession` / `Resume(db_id)`。`New` = 送摘要 prompt（收集 agent 回覆文字當 summary）→ `finish_session(completed)` → 同連線再 `session/new` → 新 db row + emit `session-reset`。`Resume` = finish 當前 → 開新 session → 讀過去 summary，**lazy 注入**（前綴到下一則使用者 prompt，避免多花一輪）→ parent_session_id 記錄。
+- **事件/檔案記錄**：notification handler 寫 `tool_call` 事件 + `session_files`（Write→create/Edit→edit/Read→read，從 rawInput.file_path + _meta.toolName）；turn 結束寫 `user_message` / `agent_message`。
+- **前端**（`index.html`/`styles.css`/`main.ts`）：header 加「＋ New」「History」；History 視圖 `list_sessions` 列出（時間/狀態/摘要 + Resume 鈕）；listen `session-reset` 清空刷新。
+- commands：`new_session` / `resume_session` / `list_sessions`（async，用 `db_handle()` 取 Arc<Db> 複本避免跨 await 持有 State）。
+
+### 驗證（使用者實測）
+聊天 → **New** → 摘要存檔 ✅；**History** 列出過去 session（摘要+時間，證明 persist+summary+讀取）✅；**Resume** 後 agent 記得先前說的「藍色」✅。DB 在 `AppData\Roaming\com.agpet.pet\agpet.db`（本機無 sqlite3 CLI，但 History 面板即讀 DB，等同驗證）。
+
+### 已知小取捨 / 後續
+- 同連線多 `session/new` 可行（已驗證 New/Resume），未走 fallback 重建連線。
+- MVP 事件記錄聚焦 user/agent/tool + files；thinking chunk、project-relative 路徑欄位之後再加。
+- 摘要/Resume 各耗一次訂閱額度。
+
+## 下一步：Milestone 3（多 agent 編排，feature A）
+
+agents.toml 設定、同時 spawn 多個 adapter、多隻寵物、Agent Router + workflow（plan-then-execute：Claude→Codex）、交接動畫、可編輯 YAML workflow。詳見 [`acp-desktop-pet-spec.md`](./acp-desktop-pet-spec.md) Milestone 3。
 
 ## 此階段刻意未做（之後里程碑）
 
-SQLite/session 持久化（M2）、多 agent 編排（M3）、跨機器（M4）、`sysinfo`/WSL 偵測 — 留待後續。
+多 agent 編排（M3）、跨機器（M4）、`sysinfo` 外部 session 偵測、WSL 偵測 — 留待後續。

@@ -61,6 +61,9 @@ const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
+const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
+const historyBtn = document.getElementById("chat-history") as HTMLButtonElement;
+const historyView = document.getElementById("history-view") as HTMLDivElement;
 
 // Streaming targets for the current agent turn.
 let currentAgent: HTMLDivElement | null = null;
@@ -112,6 +115,78 @@ inputEl.addEventListener("keydown", (e) => {
     e.preventDefault();
     sendPrompt();
   }
+});
+
+// --- Sessions: New / History / Resume (M2) --------------------------------
+
+interface SessionRow {
+  id: string;
+  started_at: number;
+  ended_at: number | null;
+  status: string;
+  initial_prompt: string | null;
+  summary: string | null;
+}
+
+function clearTranscript() {
+  messagesEl.innerHTML = "";
+  permBar.classList.add("hidden");
+  permBar.innerHTML = "";
+  resetTurn();
+  toolChips.clear();
+}
+
+async function loadHistory() {
+  historyView.innerHTML = `<div class="hist-empty">Loading…</div>`;
+  try {
+    const rows = await invoke<SessionRow[]>("list_sessions");
+    historyView.innerHTML = "";
+    if (!rows || rows.length === 0) {
+      historyView.innerHTML = `<div class="hist-empty">No past sessions yet.</div>`;
+      return;
+    }
+    for (const r of rows) {
+      const row = document.createElement("div");
+      row.className = "hist-row";
+      const when = new Date(r.started_at).toLocaleString();
+      const text = r.summary || r.initial_prompt || "(no summary)";
+      row.innerHTML =
+        `<div class="hist-meta"><span class="hist-when"></span><span class="hist-status"></span></div>` +
+        `<div class="hist-summary"></div>` +
+        `<button class="hist-resume">Resume</button>`;
+      row.querySelector(".hist-when")!.textContent = when;
+      row.querySelector(".hist-status")!.textContent = r.status;
+      row.querySelector(".hist-summary")!.textContent = text;
+      row.querySelector(".hist-resume")!.addEventListener("click", () => {
+        invoke("resume_session", { id: r.id }).catch(() => {});
+        historyView.classList.add("hidden");
+        clearTranscript();
+        addMessage("system", "Resuming previous session…");
+      });
+      historyView.appendChild(row);
+    }
+  } catch (e) {
+    historyView.innerHTML = `<div class="hist-empty">Failed to load history: ${e}</div>`;
+  }
+}
+
+newBtn.addEventListener("click", () => {
+  invoke("new_session").catch(() => {});
+  addMessage("system", "Summarizing & starting a new session…");
+});
+
+historyBtn.addEventListener("click", () => {
+  if (historyView.classList.contains("hidden")) {
+    loadHistory();
+    historyView.classList.remove("hidden");
+  } else {
+    historyView.classList.add("hidden");
+  }
+});
+
+listen("session-reset", () => {
+  clearTranscript();
+  historyView.classList.add("hidden");
 });
 
 // The pet's clickable bounding box (CSS px), covering emote above + label below.
