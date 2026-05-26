@@ -30,6 +30,7 @@ interface InstanceInfo {
 
 interface Pet {
   id: string; // instance_id
+  type: string; // type_id (e.g. claude) — used to spawn worktree workers
   name: string;
   handle: string; // space-free slug for // mentions (default = id)
   color: string;
@@ -74,6 +75,7 @@ const filePicker = document.getElementById("file-picker") as HTMLDivElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
 const stopBtn = document.getElementById("chat-stop") as HTMLButtonElement;
 const attachStrip = document.getElementById("attach-strip") as HTMLDivElement;
+const sendModes = document.getElementById("send-modes") as HTMLDivElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
 const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
@@ -100,6 +102,9 @@ const launcherList = document.getElementById("launcher-list") as HTMLDivElement;
 const workflowPanel = document.getElementById("workflow-panel") as HTMLDivElement;
 const workflowClose = document.getElementById("workflow-close") as HTMLButtonElement;
 const workflowList = document.getElementById("workflow-list") as HTMLDivElement;
+const worktreePanel = document.getElementById("worktree-panel") as HTMLDivElement;
+const worktreeClose = document.getElementById("worktree-close") as HTMLButtonElement;
+const worktreeList = document.getElementById("worktree-list") as HTMLDivElement;
 const toastEl = document.getElementById("toast") as HTMLDivElement;
 
 // Panels now report their bounding rect to the overlay (see reportRects) so only
@@ -209,6 +214,44 @@ workflowClose.addEventListener("click", hideWorkflows);
 listen("open-workflows", () => {
   buildWorkflows();
   workflowPanel.classList.remove("hidden");
+  updatePanelOpen();
+});
+
+// --- Worktrees panel ------------------------------------------------------
+async function buildWorktrees() {
+  const base = selectedPet() ?? pets[0];
+  worktreeList.innerHTML = "";
+  if (!base) { worktreeList.innerHTML = `<div class="hist-empty">Launch a pet in a repo first.</div>`; return; }
+  let items: { path: string; branch: string }[] = [];
+  try {
+    items = await invoke<{ path: string; branch: string }[]>("worktree_list", { baseInstance: base.id });
+  } catch {
+    worktreeList.innerHTML = `<div class="hist-empty">${base.name} isn't in a git repo.</div>`;
+    return;
+  }
+  if (items.length === 0) { worktreeList.innerHTML = `<div class="hist-empty">No agpet worktrees in ${base.name}'s repo.</div>`; return; }
+  for (const w of items) {
+    const row = document.createElement("div");
+    row.className = "wf-row";
+    row.innerHTML = `<div class="wf-name"></div><div class="wf-need"></div><button class="wf-run">Remove</button>`;
+    row.querySelector(".wf-name")!.textContent = w.branch;
+    row.querySelector(".wf-need")!.textContent = w.path;
+    row.querySelector(".wf-run")!.addEventListener("click", () => {
+      invoke("worktree_remove", { baseInstance: base.id, path: w.path })
+        .then(() => buildWorktrees())
+        .catch((e) => showToast(`Remove failed: ${e}`));
+    });
+    worktreeList.appendChild(row);
+  }
+}
+function hideWorktrees() {
+  worktreePanel.classList.add("hidden");
+  updatePanelOpen();
+}
+worktreeClose.addEventListener("click", hideWorktrees);
+listen("open-worktrees", () => {
+  buildWorktrees();
+  worktreePanel.classList.remove("hidden");
   updatePanelOpen();
 });
 
@@ -743,46 +786,122 @@ inputEl.addEventListener("paste", (e) => {
   }
 });
 
-function sendPrompt() {
-  const cur = selectedPet();
-  const text = inputEl.value.trim();
-  if (!cur || (!text && pendingImages.length === 0)) return;
-  // Only attach files still referenced in the text (the user may have deleted some).
-  const files = [...mentionedFiles].filter((f) => text.includes("@" + f));
-  const images = pendingImages.map((i) => ({ mime: i.mime, data: i.data }));
+type ImgPayload = { mime: string; data: string };
+interface Target { id: string; type: string }
 
-  // Resolve //handle mentions → target instance ids; no mention = current pet.
-  const targets: string[] = [];
+// Resolve //handle mentions in `text` → {id,type} targets (deduped).
+function resolveTargets(text: string): Target[] {
+  const out: Target[] = [];
   const re = /\/\/([\w-]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const handle = m[1];
     const id = mentionedAgents.get(handle) ?? pets.find((p) => p.handle === handle)?.id;
-    if (id && !targets.includes(id)) targets.push(id);
-  }
-  const recipients = targets.length ? targets : [cur.id];
-
-  const label = text || `📎 ${images.length} image${images.length > 1 ? "s" : ""}`;
-  for (const id of recipients) {
-    const p = petById.get(id);
-    if (p) {
-      addMsgTo(p, "user", label); // shows in that pet's transcript
-      resetTurn(p);
-      p.currentPlan = null; // a new turn gets a fresh plan block
+    if (id && !out.some((t) => t.id === id)) {
+      out.push({ id, type: petById.get(id)?.type ?? id.replace(/-\d+$/, "") });
     }
-    invoke("send_prompt", { instance: id, text, files, images }).catch((e) => {
-      if (p) addMsgTo(p, "system", `send failed: ${e}`);
-    });
   }
-  if (targets.length) showToast(`Sent to ${recipients.length} agent${recipients.length > 1 ? "s" : ""}`);
+  return out;
+}
 
+const slugForTask = (text: string) => slug(text.split(/\s+/).slice(0, 5).join(" ")) || `task-${Date.now()}`;
+const cleanTask = (text: string) => text.replace(/\/\/[\w-]+/g, "").replace(/[ \t]{2,}/g, " ").trim();
+
+function draftAttachments(text: string): { files: string[]; images: ImgPayload[] } {
+  return {
+    files: [...mentionedFiles].filter((f) => text.includes("@" + f)),
+    images: pendingImages.map((i) => ({ mime: i.mime, data: i.data })),
+  };
+}
+
+function clearDraft() {
   inputEl.value = "";
-  inputEl.style.height = "auto"; // collapse back to one line
+  inputEl.style.height = "auto";
   mentionedFiles.clear();
   mentionedAgents.clear();
   pendingImages.length = 0;
   renderAttachStrip();
   hidePicker();
+}
+
+// Send the prompt to each id as an independent turn (no worktree).
+function dispatchBroadcast(ids: string[], text: string, files: string[], images: ImgPayload[]) {
+  const label = text || `📎 ${images.length} image${images.length > 1 ? "s" : ""}`;
+  for (const id of ids) {
+    const p = petById.get(id);
+    if (p) { addMsgTo(p, "user", label); resetTurn(p); p.currentPlan = null; }
+    invoke("send_prompt", { instance: id, text, files, images }).catch((e) => { if (p) addMsgTo(p, "system", `send failed: ${e}`); });
+  }
+  if (ids.length > 1) showToast(`Sent to ${ids.length} agents`);
+}
+
+// Spawn a worker pet per target (parallel: own worktree each) or all into one
+// (vertical: shared worktree + sequential handoff). Falls back to broadcast off-repo.
+async function dispatchWorktree(mode: "parallel" | "vertical", targets: Target[], text: string, files: string[], images: ImgPayload[]) {
+  const base = selectedPet();
+  if (!base) return;
+  const isRepo = await invoke<boolean>("is_git_repo", { baseInstance: base.id }).catch(() => false);
+  if (!isRepo) {
+    showToast("Not a git repo — broadcasting instead");
+    dispatchBroadcast(targets.map((t) => t.id), text, files, images);
+    return;
+  }
+  const task = cleanTask(text);
+  const s = slugForTask(text);
+  try {
+    if (mode === "parallel") {
+      let n = 0;
+      for (const t of targets) {
+        const path = await invoke<string>("worktree_create", { baseInstance: base.id, branch: `agpet/${s}/${t.type}` });
+        const workerId = await invoke<string>("launch_instance", { kind: t.type, cwd: path });
+        invoke("send_prompt", { instance: workerId, text: task, files, images }).catch(() => {});
+        n++;
+      }
+      showToast(`Parallel: ${n} worktree worker${n > 1 ? "s" : ""} started`);
+    } else {
+      const path = await invoke<string>("worktree_create", { baseInstance: base.id, branch: `agpet/${s}` });
+      const workers: string[] = [];
+      for (const t of targets) {
+        workers.push(await invoke<string>("launch_instance", { kind: t.type, cwd: path }));
+      }
+      await invoke("run_handoff", { workers, text: task });
+      showToast(`Vertical: ${workers.length} agents in one worktree`);
+    }
+  } catch (e) {
+    showToast(`Worktree task failed: ${e}`);
+  }
+}
+
+// When //mentions are present, ask Parallel / Vertical / Broadcast before sending.
+let pendingSend: { targets: Target[]; text: string; files: string[]; images: ImgPayload[] } | null = null;
+function hideSendModes() { sendModes.classList.add("hidden"); pendingSend = null; }
+sendModes.querySelectorAll("button").forEach((b) => {
+  b.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const mode = (b as HTMLElement).dataset.mode!;
+    const d = pendingSend;
+    hideSendModes();
+    if (!d) return;
+    if (mode === "broadcast") dispatchBroadcast(d.targets.map((t) => t.id), d.text, d.files, d.images);
+    else void dispatchWorktree(mode as "parallel" | "vertical", d.targets, d.text, d.files, d.images);
+    clearDraft();
+  });
+});
+
+function sendPrompt() {
+  if (!sendModes.classList.contains("hidden")) return; // chooser already open
+  const cur = selectedPet();
+  const text = inputEl.value.trim();
+  if (!cur || (!text && pendingImages.length === 0)) return;
+  const { files, images } = draftAttachments(text);
+  const targets = resolveTargets(text);
+  if (targets.length === 0) {
+    dispatchBroadcast([cur.id], text, files, images); // no mention → current pet
+    clearDraft();
+    return;
+  }
+  pendingSend = { targets, text, files, images };
+  sendModes.classList.remove("hidden");
 }
 
 // Swap Send ⇄ Stop based on whether the selected pet is mid-turn.
@@ -807,7 +926,7 @@ stopBtn.addEventListener("click", () => {
 });
 sendBtn.addEventListener("click", sendPrompt);
 closeBtn.addEventListener("click", () => { hidePicker(); closePanel(); });
-inputEl.addEventListener("input", () => { autoGrow(); void refreshPicker(); });
+inputEl.addEventListener("input", () => { hideSendModes(); autoGrow(); void refreshPicker(); });
 inputEl.addEventListener("blur", () => { setTimeout(hidePicker, 120); });
 inputEl.addEventListener("keydown", (e) => {
   if (picker) {
@@ -816,6 +935,7 @@ inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectItem(picker.sel); return; }
     if (e.key === "Escape") { e.preventDefault(); hidePicker(); return; }
   }
+  if (e.key === "Escape" && !sendModes.classList.contains("hidden")) { e.preventDefault(); hideSendModes(); return; }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendPrompt();
@@ -923,6 +1043,7 @@ function addPet(info: InstanceInfo) {
   messagesHost.appendChild(container);
   const pet: Pet = {
     id: info.instance_id,
+    type: info.type_id,
     name: info.name,
     handle: info.instance_id, // default mention handle = id; rename overrides
     color: info.color,
@@ -1259,6 +1380,7 @@ function openPanelRects() {
     ["__panel:chat", panel],
     ["__panel:launcher", launcherPanel],
     ["__panel:workflow", workflowPanel],
+    ["__panel:worktree", worktreePanel],
   ];
   return panels
     .filter(([, el]) => !el.classList.contains("hidden"))

@@ -431,6 +431,25 @@ impl AcpManager {
         );
         Ok(())
     }
+
+    /// Ad-hoc sequential handoff over explicit worker ids (vertical worktree task).
+    pub fn run_handoff(&self, worker_ids: Vec<String>, text: String) -> Result<(), String> {
+        if self
+            .workflow_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("A workflow is already running — wait for it to finish.".into());
+        }
+        workflow::run_handoff(
+            self.app.clone(),
+            self.instances.clone(),
+            worker_ids,
+            text,
+            self.workflow_running.clone(),
+        );
+        Ok(())
+    }
 }
 
 /// Dirs never descended into when listing files for the `@`-mention picker.

@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local tooling / agent state (not part of the app)
+.claude/
+.agpet-worktrees/

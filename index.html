@@ -28,6 +28,15 @@
       <div id="workflow-list"></div>
     </div>
 
+    <div id="worktree-panel" class="hidden">
+      <div class="launcher-header">
+        <span>Git worktrees</span>
+        <button id="worktree-close" title="Close">×</button>
+      </div>
+      <div class="launcher-hint">Worktrees created for parallel/vertical tasks (in the selected pet's repo). Remove fails if a worktree has uncommitted changes — commit or discard first.</div>
+      <div id="worktree-list"></div>
+    </div>
+
     <div id="toast" class="hidden"></div>
 
     <div id="chat-panel" class="hidden">
@@ -75,6 +84,11 @@
       <div id="permission-bar" class="hidden"></div>
       <div id="attach-strip" class="hidden"></div>
       <div class="chat-input-row">
+        <div id="send-modes" class="hidden">
+          <button data-mode="parallel">⫶ Parallel<span>each agent · own git worktree</span></button>
+          <button data-mode="vertical">▤ Vertical<span>one worktree · handoff in order</span></button>
+          <button data-mode="broadcast">📣 Broadcast<span>same folder · no worktree</span></button>
+        </div>
         <div id="file-picker" class="hidden"></div>
         <textarea id="chat-input" rows="1" placeholder="Message…  @ files · / commands"></textarea>
         <button id="chat-send" title="Send">➤</button>

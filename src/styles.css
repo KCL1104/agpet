@@ -18,7 +18,8 @@ body {
 /* ===== Launcher panel =================================================== */
 
 #launcher-panel,
-#workflow-panel {
+#workflow-panel,
+#worktree-panel {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -38,14 +39,17 @@ body {
   font-size: 13.5px;
 }
 #launcher-panel.hidden,
-#workflow-panel.hidden {
+#workflow-panel.hidden,
+#worktree-panel.hidden {
   display: none;
 }
 #launcher-panel:not(.hidden),
-#workflow-panel:not(.hidden) {
+#workflow-panel:not(.hidden),
+#worktree-panel:not(.hidden) {
   animation: panel-in 0.18s cubic-bezier(0.2, 0.7, 0.3, 1);
 }
-#workflow-list {
+#workflow-list,
+#worktree-list {
   padding: 10px 12px 14px;
   overflow-y: auto;
   display: flex;
@@ -632,6 +636,45 @@ body {
   gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--border);
+}
+
+/* ---- Send-mode chooser (// mentions: parallel / vertical / broadcast) ---- */
+#send-modes {
+  position: absolute;
+  bottom: calc(100% - 4px);
+  left: 12px;
+  right: 12px;
+  background: var(--panel-bg, rgba(22, 24, 29, 0.98));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#send-modes.hidden { display: none; }
+#send-modes button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 10px;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+#send-modes button:hover { background: var(--accent-soft); }
+#send-modes button span {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ---- @ file-mention picker ---- */

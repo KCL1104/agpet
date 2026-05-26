@@ -1,5 +1,6 @@
 mod acp;
 mod db;
+mod git;
 mod overlay;
 mod tray;
 
@@ -73,6 +74,50 @@ fn list_dir_files(instance: String, state: tauri::State<'_, acp::AcpManager>) ->
 #[tauri::command]
 fn cancel_prompt(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
     state.cancel(&instance)
+}
+
+/// Create a git worktree (new branch off HEAD) in the base instance's repo.
+#[tauri::command]
+fn worktree_create(
+    base_instance: String,
+    branch: String,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<String, String> {
+    let repo = state.cwd_of(&base_instance).ok_or_else(|| format!("unknown instance: {base_instance}"))?;
+    git::worktree_create(&repo, &branch).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// List worktrees agpet created under the base instance's repo.
+#[tauri::command]
+fn worktree_list(
+    base_instance: String,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<Vec<git::WorktreeInfo>, String> {
+    let repo = state.cwd_of(&base_instance).ok_or_else(|| format!("unknown instance: {base_instance}"))?;
+    git::worktree_list(&repo)
+}
+
+/// Remove a worktree (fails if it has uncommitted changes).
+#[tauri::command]
+fn worktree_remove(
+    base_instance: String,
+    path: String,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<(), String> {
+    let repo = state.cwd_of(&base_instance).ok_or_else(|| format!("unknown instance: {base_instance}"))?;
+    git::worktree_remove(&repo, &path)
+}
+
+/// Is the base instance's working dir a git repo? (Gate the worktree options.)
+#[tauri::command]
+fn is_git_repo(base_instance: String, state: tauri::State<'_, acp::AcpManager>) -> bool {
+    state.cwd_of(&base_instance).map(|p| git::is_repo(&p)).unwrap_or(false)
+}
+
+/// Run a vertical task: sequential handoff over the given worker instance ids.
+#[tauri::command]
+fn run_handoff(workers: Vec<String>, text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.run_handoff(workers, text)
 }
 
 #[tauri::command]
@@ -157,6 +202,11 @@ pub fn run() {
             send_prompt,
             list_dir_files,
             cancel_prompt,
+            worktree_create,
+            worktree_list,
+            worktree_remove,
+            is_git_repo,
+            run_handoff,
             respond_permission,
             new_session,
             resume_session,

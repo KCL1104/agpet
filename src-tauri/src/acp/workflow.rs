@@ -255,3 +255,66 @@ pub fn run(
         let _ = app.emit("workflow-done", json!({ "workflow_id": wf.id, "ok": true }));
     });
 }
+
+/// Find a running instance by id; returns (id, name, sender).
+fn find_by_id(
+    instances: &Arc<Mutex<Vec<Instance>>>,
+    id: &str,
+) -> Option<(String, String, mpsc::UnboundedSender<AcpCommand>)> {
+    let g = instances.lock().ok()?;
+    g.iter()
+        .find(|i| i.instance_id == id && i.cmd_tx.is_some())
+        .map(|i| (i.instance_id.clone(), i.name.clone(), i.cmd_tx.clone().unwrap()))
+}
+
+/// Ad-hoc sequential handoff over an explicit, ordered list of instance ids
+/// (the vertical-task workers, all in one worktree). Threads each turn's output
+/// into the next and emits the same handoff/step/done/error events as a workflow.
+pub fn run_handoff(
+    app: AppHandle,
+    instances: Arc<Mutex<Vec<Instance>>>,
+    worker_ids: Vec<String>,
+    text: String,
+    running: Arc<AtomicBool>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let _release = ReleaseOnDrop(running);
+        let _ = app.emit("workflow-step", json!({ "workflow_id": "adhoc", "status": "started" }));
+        let mut prev_instance: Option<String> = None;
+        let mut prev_out = String::new();
+        for (i, id) in worker_ids.iter().enumerate() {
+            let Some((iid, name, tx)) = find_by_id(&instances, id) else {
+                let _ = app.emit("workflow-error", json!({ "message": format!("worker {id} not running") }));
+                return;
+            };
+            let prompt = if i == 0 {
+                text.clone()
+            } else {
+                format!("{text}\n\n---\nPrevious agent's output:\n{prev_out}")
+            };
+            let _ = app.emit("workflow-handoff", json!({ "from_instance": prev_instance, "to_instance": iid }));
+            let _ = app.emit("workflow-step", json!({
+                "workflow_id": "adhoc", "step": format!("step {}", i + 1),
+                "instance_id": iid, "type": name,
+            }));
+            let (rtx, rrx) = oneshot::channel::<Result<String, String>>();
+            if tx.send(AcpCommand::RunStep { text: prompt, reply: rtx }).is_err() {
+                let _ = app.emit("workflow-error", json!({ "message": "agent stopped mid-task" }));
+                return;
+            }
+            match rrx.await {
+                Ok(Ok(out)) => prev_out = out,
+                Ok(Err(e)) => {
+                    let _ = app.emit("workflow-error", json!({ "message": e }));
+                    return;
+                }
+                Err(_) => {
+                    let _ = app.emit("workflow-error", json!({ "message": "step cancelled" }));
+                    return;
+                }
+            }
+            prev_instance = Some(iid);
+        }
+        let _ = app.emit("workflow-done", json!({ "workflow_id": "adhoc", "ok": true }));
+    });
+}

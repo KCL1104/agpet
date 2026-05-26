@@ -241,6 +241,16 @@ ACP 盤點裡「值得做」的兩項：
 - **命名 session**：點 header 標題就地改名（inline input）；`Pet.handle`（slug，預設=id）供 `//` 用、`Pet.name` 供顯示（header + canvas label）。存 `agpet.name.<id>` 跨重啟還原（同拖曳位置的 id-keying）。
 - 純前端、無 Rust 改動；`tsc` 通過、Vite 熱載實測中。caveat：跨不同資料夾的寵物，`@檔案` 路徑各自以自己的 cwd 解析；改名只在前端（tray 仍顯示啟動名）。
 
+## git worktree 任務（平行 / 垂直）✅ 完成（實測中）
+
+prompt 內有 `//標註` → send 時跳 **平行 / 垂直 / 廣播** 選單；平行/垂直用 git worktree 隔離，**另開同型別 worker pet 進 worktree**（不動原 pet）。
+- **git 層**（新 `src-tauri/src/git.rs`，shell `git`，無新 crate）：`is_repo`、`worktree_create`（`git worktree add -b <branch> .agpet-worktrees/<slug> HEAD`，分支衝突加尾碼；`.agpet-worktrees/` 寫進 `.git/info/exclude` 不動 tracked .gitignore）、`worktree_list`（`--porcelain` 解析，只留 `.agpet-worktrees/` 下的）、`worktree_remove`（無 `--force`，有未 commit 變更會報錯）。`lib.rs` 加 `worktree_create/list/remove` + `is_git_repo`（皆以 base_instance 取 repo=cwd_of）。
+- **垂直接力**（`workflow.rs` `run_handoff` + `mod.rs`/`lib.rs`）：對**明確的 worker id 清單**依序 `RunStep`、把前一步輸出串進下一步（不能用既有 type-based workflow，否則會抓到原本同型別的 pet）；沿用 workflow 併發旗標 + handoff/step/done 事件（📦 動畫）。
+- **前端**（`main.ts`/`index.html`/`styles.css`）：`Pet.type`（worker 用）；`#send-modes` 選單（//標註時 send 跳出，Esc/打字取消）；**平行**＝逐目標 `worktree_create`→`launch_instance(type, path)`→`send_prompt`（各自分支）；**垂直**＝開一個 worktree、把 workers 都啟動進去、`run_handoff`。任務文字會去掉 `//token`。非 git repo→toast 後退回廣播。
+- **worktree 管理面板**：tray「Worktrees…」→ `open-worktrees` → 列出（branch + path）+ Remove（清乾淨的，有變更則報錯）。
+- 分支命名 `agpet/<task-slug>/<type>`（平行）或 `agpet/<task-slug>`（垂直）；worktree 放 `<repo>/.agpet-worktrees/`，**保留**讓你手動 review/merge。
+- **驗證**：`cargo check` + `tsc` 通過；`git worktree add/list/remove` 在臨時 repo 實測序列正確。**待目視**：平行各自分支、垂直 📦 接力、面板清理。caveat：合併回主線是手動；worker 不顯示 user 泡泡（直接看 agent 回覆）。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。
