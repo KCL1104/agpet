@@ -63,10 +63,11 @@ impl DelegateServer {
     }
 
     #[tool(
-        description = "Delegate a task to another agent by name. Default (wait=false) dispatches \
-                       it to run in parallel and returns immediately so you can keep doing your \
-                       own work; pass wait=true only when you need that agent's result before \
-                       continuing. Busy agents are refused."
+        description = "Delegate a task to another agent by name. It runs in an isolated git \
+                       worktree (a fresh branch) so it can't clobber your working tree. Default \
+                       (wait=false) dispatches it to run in parallel and returns a handle \
+                       immediately so you can keep doing your own work; pass wait=true only when \
+                       you need that agent's result before continuing."
     )]
     async fn delegate(&self, Parameters(args): Parameters<DelegateArgs>) -> String {
         let mgr = self.app.state::<AcpManager>();
