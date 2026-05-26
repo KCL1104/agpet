@@ -14,6 +14,7 @@ pub use workflow::Workflow;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -91,6 +92,9 @@ pub struct AcpManager {
     app: AppHandle,
     cwd: PathBuf,
     log_dir: PathBuf,
+    /// True while a workflow run is in flight; serializes runs so two workflows
+    /// can't interleave prompts on the same agent instance.
+    workflow_running: Arc<AtomicBool>,
 }
 
 impl AcpManager {
@@ -103,6 +107,7 @@ impl AcpManager {
             app,
             cwd: config.cwd.clone(),
             log_dir: config.log_dir.clone(),
+            workflow_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -331,13 +336,29 @@ impl AcpManager {
         workflow::load_all(&self.app)
     }
 
-    /// Start a workflow run (spawns a router task that drives the steps).
+    /// Start a workflow run (spawns a router task that drives the steps). Rejects
+    /// a second run while one is in flight so two workflows can't interleave
+    /// prompts on the same instance.
     pub fn run_workflow(&self, workflow_id: &str, user_input: String) -> Result<(), String> {
+        // Resolve first so an unknown-id error doesn't leave the flag set.
         let wf = workflow::load_all(&self.app)
             .into_iter()
             .find(|w| w.id == workflow_id)
             .ok_or_else(|| format!("unknown workflow: {workflow_id}"))?;
-        workflow::run(self.app.clone(), self.instances.clone(), wf, user_input);
+        if self
+            .workflow_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("A workflow is already running — wait for it to finish.".into());
+        }
+        workflow::run(
+            self.app.clone(),
+            self.instances.clone(),
+            wf,
+            user_input,
+            self.workflow_running.clone(),
+        );
         Ok(())
     }
 }

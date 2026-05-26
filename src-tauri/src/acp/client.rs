@@ -527,6 +527,8 @@ fn chat_event(notification: &SessionNotification) -> Option<serde_json::Value> {
             "kind": "tool_update",
             "tool_call_id": update.get("toolCallId"),
             "status": update.get("status"),
+            // The tool's result text (file contents, command output, …), if present.
+            "result": update.get("content").and_then(extract_text),
         })),
         "plan" => Some(json!({ "kind": "plan" })),
         _ => None,

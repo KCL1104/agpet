@@ -419,8 +419,8 @@ body {
 .tool {
   align-self: flex-start;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   font-size: 12px;
   background: var(--surface);
@@ -428,6 +428,21 @@ body {
   border-radius: 10px;
   padding: 7px 10px;
   max-width: 90%;
+}
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Tools that captured output get a click-to-expand affordance. */
+.tool.has-out .tool-head {
+  cursor: pointer;
+}
+.tool.has-out .tool-head::after {
+  content: "▸";
+  margin-left: 4px;
+  opacity: 0.5;
+  flex: 0 0 auto;
 }
 .tool .name {
   overflow: hidden;
@@ -452,6 +467,22 @@ body {
 .tool.failed .badge {
   background: rgba(192, 57, 43, 0.28);
   color: #f0a097;
+}
+.tool-out {
+  margin: 0;
+  padding: 7px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 7px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.tool-out.hidden {
+  display: none;
 }
 
 /* ---- Permission bar ---- */

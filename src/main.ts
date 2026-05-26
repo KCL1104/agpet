@@ -616,6 +616,19 @@ function addPet(info: InstanceInfo) {
     toolChips: new Map(),
     cfg: null,
   };
+  // Restore a dropped position from a previous run, if any. Instance ids are
+  // deterministic across restarts (the counter resets), so this is best-effort
+  // keyed by id; clamp in case the screen is now narrower.
+  const savedPos = localStorage.getItem("agpet.pos." + pet.id);
+  if (savedPos) {
+    try {
+      const { x } = JSON.parse(savedPos);
+      if (typeof x === "number") {
+        pet.x = Math.max(0, Math.min(window.innerWidth - PET_W, x));
+        pet.pinned = true;
+      }
+    } catch {}
+  }
   pets.push(pet);
   petById.set(pet.id, pet);
   layoutPets();
@@ -671,6 +684,7 @@ interface ChatEvent {
   tool_call_id?: string | null;
   title?: string | null;
   status?: string | null;
+  result?: string | null;
 }
 
 listen<ChatEvent>("chat-event", (event) => {
@@ -701,10 +715,18 @@ listen<ChatEvent>("chat-event", (event) => {
       if (!chip) {
         chip = document.createElement("div");
         chip.className = "tool";
+        // .tool-head (clickable) shows name + status; .tool-out holds the
+        // tool's result and is toggled by clicking the head.
+        chip.innerHTML =
+          `<div class="tool-head">🔧 <span class="name"></span> <span class="badge"></span></div>` +
+          `<pre class="tool-out hidden"></pre>`;
+        chip.querySelector(".tool-head")!.addEventListener("click", () => {
+          const out = chip!.querySelector(".tool-out") as HTMLElement;
+          if (out.textContent) out.classList.toggle("hidden");
+        });
         pet.container.appendChild(chip);
         pet.toolChips.set(id, chip);
       }
-      chip.innerHTML = `🔧 <span class="name"></span> <span class="badge"></span>`;
       chip.querySelector(".name")!.textContent = ev.title ?? "tool";
       chip.querySelector(".badge")!.textContent = ev.status ?? "running";
       if (pet.id === selected) {
@@ -722,6 +744,12 @@ listen<ChatEvent>("chat-event", (event) => {
         chip.classList.toggle("failed", status === "failed");
         const badge = chip.querySelector(".badge");
         if (badge) badge.textContent = status;
+        if (ev.result) {
+          const out = chip.querySelector(".tool-out") as HTMLElement;
+          out.textContent = ev.result.slice(0, 4000); // cap big Read/Bash output
+          chip.classList.add("has-out"); // shows the ▸ expand affordance
+        }
+        if (pet.id === selected) scrollToBottom();
       }
       break;
     }
@@ -1006,7 +1034,11 @@ window.addEventListener("mouseup", () => {
   const { pet, moved } = drag;
   drag = null;
   invoke("set_dragging", { dragging: false }).catch(() => {});
-  if (!moved) openPanelFor(pet.id); // a click, not a drag
+  if (moved) {
+    localStorage.setItem("agpet.pos." + pet.id, JSON.stringify({ x: pet.x })); // remember the drop
+  } else {
+    openPanelFor(pet.id); // a click, not a drag
+  }
 });
 
 async function init() {

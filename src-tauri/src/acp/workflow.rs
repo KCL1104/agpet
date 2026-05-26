@@ -7,6 +7,7 @@
 //! `app_config_dir()/workflows/*.yaml` (Slice 2b).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -187,9 +188,26 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> String {
     s
 }
 
-/// Spawn the router task that drives the workflow.
-pub fn run(app: AppHandle, instances: Arc<Mutex<Vec<Instance>>>, wf: Workflow, user_input: String) {
+/// Resets the "a workflow is running" flag when the router task ends, on any
+/// exit path (completion, an early-return error, or a panic).
+struct ReleaseOnDrop(Arc<AtomicBool>);
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Spawn the router task that drives the workflow. `running` is held true for
+/// the duration and released by the Drop guard so only one workflow runs at a time.
+pub fn run(
+    app: AppHandle,
+    instances: Arc<Mutex<Vec<Instance>>>,
+    wf: Workflow,
+    user_input: String,
+    running: Arc<AtomicBool>,
+) {
     tauri::async_runtime::spawn(async move {
+        let _release = ReleaseOnDrop(running);
         let _ = app.emit("workflow-step", json!({ "workflow_id": wf.id, "status": "started" }));
         let mut vars: HashMap<String, String> = HashMap::new();
         vars.insert("user_input".into(), user_input);

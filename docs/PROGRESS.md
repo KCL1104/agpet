@@ -197,11 +197,17 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
   - `#settings-popover` 是 `#chat-panel` 子元素且在其框內 → 被 chat 面板矩形涵蓋，免另回報。
 - **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：開聊天時面板外透明區可點桌面、面板內/寵物照常可點；空桌開 launcher 仍可選資料夾+Launch；打字時游標移出面板不中斷；拖/縮面板不掉穿透；全關後桌面完全穿透。
 
+## 打磨批次 3（並行三件）✅ 完成（待目視驗證）
+
+- **workflow 併發護欄**（`acp/mod.rs` + `acp/workflow.rs`）：原本兩個 workflow 同時跑會把 `RunStep` prompt **交錯送進同一隻 instance 的 session → 兩邊都壞**（session 一次只處理一個 prompt，`block_task().await`）。加 `AcpManager.workflow_running: Arc<AtomicBool>`；`run_workflow` 先解析 workflow（未知 id 不動旗標）再 `compare_exchange(false,true)`，已在跑就回 `Err("A workflow is already running…")`（`run_workflow` command 已回 Result，前端 `.catch` 既有 toast，**前端零改**）。`workflow::run` 收 flag，spawn 內用 **Drop guard `ReleaseOnDrop`** 在任何結束路徑（完成/早退錯誤/panic）自動釋放。**採「拒絕」非「排隊」**（單人 app，排隊屬過度設計）。
+- **拖曳位置跨重啟保留**（`main.ts`，純前端）：洞察 —— instance id 其實**跨重啟可決定**（`next_n` 重啟歸零，第一隻 Claude 永遠是 `claude-1`），故直接用 `pet.id` 當 key 即可（best-effort，依啟動順序；同 session 關掉再開會拿到新 id → 無舊紀錄、不會誤套）。放開（真的有拖動）時存 `agpet.pos.<id>={x}`；`addPet` 在 `layoutPets` 前讀回 → `pinned=true` + 夾範圍。無 schema/後端改動。
+- **工具輸出渲染**（`acp/client.rs` + `main.ts` + `styles.css`）：`chat_event` 的 `tool_call_update` 原本只送 status，現加 `result`（`update.content` 經既有 `extract_text` 取文字）。前端 chip 改成 `.tool-head`（可點）+ 折疊 `.tool-out`（`<pre>`）：有輸出時加 `has-out`（顯示 ▸）、點 head 展開/收合；輸出截 4000 字避免 DOM 爆。CSS 加 `.tool-head`/`.tool-out`（等寬、捲動、最高 220px）。
+- **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：跑 workflow 期間再觸發第二個 → 被拒 + toast、第一個照跑完；拖寵物後重啟 app 再開同一隻 → 回到放開處；跑工具（如 `date`/讀檔）→ chip 可點開看輸出、completed/failed 樣式照舊、大輸出可捲。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。
-- （進階、可選）workflow 步驟間「同檔衝突鎖」：第二個 workflow 要動同檔時等第一個完成。
-- 拖動位置**跨重啟不保留**（instance id 每次重生）—— 若要保留需改用穩定鍵持久化。
+- 主要 backlog 已清。剩餘多為更大方向（見「更後面」）或小修飾（拖曳位置跨不同螢幕寬度的重映射、工具輸出的語法highlight 等），按需再做。
 
 > 接手提示：架構已成熟 —— 加 agent = 改 `agents.toml`（config-only）；加 workflow = 在 `app_config_dir()/workflows/` 丟一個 `*.yaml`（同 id 覆蓋內建，免重啟）；事件/指令皆以 `instance_id` 為鍵、DB 以 `type_id`。關鍵檔案見各里程碑「關鍵檔案」段。本批 + 先前 commit 仍為本機，需 `git push`。
 
