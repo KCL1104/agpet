@@ -922,11 +922,14 @@ function dispatchOrchestrate(targets: Target[], text: string, files: string[], i
   if (!cur) return;
   const names = targets.map((t) => petById.get(t.id)?.name).filter((n): n is string => !!n);
   const note = names.length
-    ? `\n\n(Do your own part of this yourself, and start on it right away — don't wait on the others. ` +
-      `For the parts meant for ${names.join(", ")}, hand them off with the \`delegate\` tool using wait:false ` +
-      `so they run in parallel (each reports in its own chat); delegate returns a handle. After you've done ` +
-      `your own work, if you want to fold their results into a final answer, call the \`collect\` tool with each ` +
-      `handle. Only use delegate wait:true for a piece whose result you need before you can even start.)`
+    ? `\n\n---\nYou are the orchestrator for this request. Follow these steps exactly:\n` +
+      `1. For each part meant for another agent (${names.join(", ")}), call the \`delegate\` tool with wait:false. ` +
+      `Each call returns a handle — keep every handle. Dispatch all of them before doing anything else.\n` +
+      `2. Now do your own part of the task yourself, while they run in parallel.\n` +
+      `3. When your own part is done, you MUST call the \`collect\` tool once for every handle from step 1 to ` +
+      `retrieve those agents' results (collect blocks until each finishes).\n` +
+      `4. Combine your work and all collected results into a single final answer for the user.\n` +
+      `Use delegate wait:true only for a piece whose result you need before you can even start step 2.`
     : "";
   addMsgTo(cur, "user", text); // show the original prompt in the mother's transcript
   resetTurn(cur);
