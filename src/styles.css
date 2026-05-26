@@ -571,6 +571,20 @@ body {
   border-color: transparent;
 }
 
+/* ---- Rename session (inline title input) ---- */
+.rename-input {
+  font: inherit;
+  font-weight: 650;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  outline: none;
+  width: 12em;
+  max-width: 60vw;
+}
+
 /* ---- Pasted image attachments ---- */
 #attach-strip {
   display: flex;

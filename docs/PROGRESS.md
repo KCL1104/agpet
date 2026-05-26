@@ -228,6 +228,19 @@ ACP 盤點裡「值得做」的兩項：
 - **貼圖（`ContentBlock::Image`）**：聊天輸入框 **Ctrl+V 貼上圖片** → 輸入框上方出現縮圖列（可 × 移除）；送出時夾帶。後端 `PromptImage{mime,data(base64)}`、`AcpCommand::Prompt` 加 `images`、`send_prompt(...,images)`、Prompt arm push `ContentBlock::Image(ImageContent::new(data,mime))`。前端 `paste` 事件 → `FileReader` 取 base64 data URL、`pendingImages` + `renderAttachStrip`、`sendPrompt` 夾帶並允許「只有圖片無文字」也能送。⚠️ 需 agent 宣告 `promptCapabilities.image`（Claude 支援）。
 - **`current_mode_update` 同步**：`chat_event` 轉發 `{kind:"mode",mode_id}`；前端更新 `cfg.modes.currentModeId` + 即時設定 ⚙ 的 mode 下拉，讓 agent 自己換 mode 時面板跟著動。
 
+## Reload + 輸入框修正 ✅ 完成（已 push）
+
+- **Reload（⟳）**：header 加 ⟳ 鈕，任何狀態（含卡 connecting）都能重連。`client::start` 改回傳 task `JoinHandle`，`AcpManager` 每實例存著，reload(retry)/close 時 **abort** 它——解決「卡在握手、看不到 cmd_tx 被丟棄」的殭屍 adapter（abort→future drop→adapter stdin 關→退出）。前端呼叫既有 `retry_agent`。Reload 會開新 session。
+- **輸入框**：placeholder 縮短避免換行觸發捲軸；移除捲軸方向鍵、`#chat-input` 套細捲軸；輸入框隨內容 auto-grow、送出後收回單行。
+
+## `//` 標註 agent + 平行廣播 + 新 session + 命名 ✅ 完成（純前端，實測中）
+
+像 `@` 標檔案一樣，用 `//` 標註「正在跑的 session」並把 prompt **平行**送給它們：
+- **`//` 選單**（`main.ts`，沿用 completion picker）：`activeTrigger` 在 `@`/`/` 之前先判 `//`（前面需空白/開頭，避開 `https://`）。`//` branch 列出執行中寵物（比對 name/handle）+ 每個型別的 **➕ New <type>**（`list_types` 快取）。`PickItem` 加 `mentionId`/`newType`；`selectItem` 改 async：選現有→記 `mentionedAgents[handle]=id`、選 ➕New→`launch_instance(kind, last cwd)` 取回 id 再記並插入 `//id`。
+- **平行廣播**（`sendPrompt`）：用 `/\/\/([\w-]+)/` 解析 `//handle`→目標 id（先查 `mentionedAgents`，再以執行中寵物的 handle 比對）；有目標就**逐一**在各自 transcript `addMsgTo` + `send_prompt`、toast「Sent to N」；無目標＝送目前寵物（原行為）。
+- **命名 session**：點 header 標題就地改名（inline input）；`Pet.handle`（slug，預設=id）供 `//` 用、`Pet.name` 供顯示（header + canvas label）。存 `agpet.name.<id>` 跨重啟還原（同拖曳位置的 id-keying）。
+- 純前端、無 Rust 改動；`tsc` 通過、Vite 熱載實測中。caveat：跨不同資料夾的寵物，`@檔案` 路徑各自以自己的 cwd 解析；改名只在前端（tray 仍顯示啟動名）。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。

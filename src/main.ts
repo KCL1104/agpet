@@ -31,6 +31,7 @@ interface InstanceInfo {
 interface Pet {
   id: string; // instance_id
   name: string;
+  handle: string; // space-free slug for // mentions (default = id)
   color: string;
   x: number;
   customY: number; // roaming height set by dragging; -1 = default baseline
@@ -470,6 +471,49 @@ function refreshHeader() {
   statusText.textContent = meta(p.state).label || "idle";
 }
 
+// --- Session naming (for friendlier // mentions) --------------------------
+function slug(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^\w-]/g, "");
+}
+function renamePet(pet: Pet, raw: string) {
+  const name = raw.trim();
+  if (!name) return;
+  pet.name = name;
+  let h = slug(name) || pet.id;
+  if (pets.some((p) => p.id !== pet.id && p.handle === h)) h = `${h}-${pet.id}`; // keep unique
+  pet.handle = h;
+  localStorage.setItem("agpet.name." + pet.id, JSON.stringify({ name: pet.name, handle: pet.handle }));
+  if (pet.id === selected) refreshHeader();
+}
+
+// Click the chat title to rename the selected session (inline input).
+titleEl.style.cursor = "text";
+titleEl.title = "Click to rename this session";
+titleEl.addEventListener("click", () => {
+  const pet = selectedPet();
+  if (!pet || titleEl.dataset.editing) return;
+  titleEl.dataset.editing = "1";
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = pet.name;
+  titleEl.style.display = "none";
+  titleEl.after(input);
+  input.focus();
+  input.select();
+  const commit = (save: boolean) => {
+    if (save) renamePet(pet, input.value);
+    input.remove();
+    titleEl.style.display = "";
+    titleEl.textContent = pet.name;
+    delete titleEl.dataset.editing;
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+  });
+  input.addEventListener("blur", () => commit(true));
+});
+
 function selectAgent(id: string) {
   selected = id;
   for (const p of pets) {
@@ -502,12 +546,16 @@ function closePanel() {
   updatePanelOpen();
 }
 
-// --- Completion picker (@ files, / commands) ------------------------------
-interface PickItem { insert: string; label: string; hint?: string; file?: string }
+// --- Completion picker (@ files, / commands, // agents) -------------------
+interface PickItem { insert: string; label: string; hint?: string; file?: string; mentionId?: string; newType?: string }
 const fileCache = new Map<string, string[]>(); // instance_id -> cwd file list
 const cmdsByInstance = new Map<string, { name: string; description: string }[]>();
 let picker: { items: PickItem[]; sel: number; tokenStart: number } | null = null;
 const mentionedFiles = new Set<string>();
+// handle -> instance_id for agents @-mentioned in the current draft (incl. ones
+// spawned via "➕ New …", whose id is known before the pet finishes connecting).
+const mentionedAgents = new Map<string, string>();
+let typesCache: { type_id: string; name: string; color: string }[] | null = null;
 
 async function ensureFiles(instanceId: string): Promise<string[]> {
   const cached = fileCache.get(instanceId);
@@ -522,11 +570,16 @@ async function ensureFiles(instanceId: string): Promise<string[]> {
   }
 }
 
-// Active completion trigger: an "@" mention anywhere (no whitespace after), or a
-// "/" command when the whole message starts with "/".
-function activeTrigger(): { trigger: "@" | "/"; query: string; start: number } | null {
+// Active completion trigger: a "//" agent mention anywhere, an "@" file mention
+// anywhere, or a "/" command when the whole message starts with "/". "//" is
+// checked first so it wins over the single-"/" command trigger.
+function activeTrigger(): { trigger: "@" | "/" | "//"; query: string; start: number } | null {
   const pos = inputEl.selectionStart ?? inputEl.value.length;
   const upto = inputEl.value.slice(0, pos);
+  const dbl = upto.lastIndexOf("//");
+  if (dbl >= 0 && (dbl === 0 || /\s/.test(upto[dbl - 1])) && !/\s/.test(upto.slice(dbl + 2))) {
+    return { trigger: "//", query: upto.slice(dbl + 2), start: dbl };
+  }
   const at = upto.lastIndexOf("@");
   if (at >= 0 && (at === 0 || /\s/.test(upto[at - 1])) && !/\s/.test(upto.slice(at + 1))) {
     return { trigger: "@", query: upto.slice(at + 1), start: at };
@@ -591,6 +644,24 @@ async function refreshPicker() {
       .sort((a, b) => scoreFile(b, q) - scoreFile(a, q))
       .slice(0, 12)
       .map((f) => ({ insert: "@" + f + " ", label: f, file: f }));
+  } else if (t.trigger === "//") {
+    if (!typesCache) {
+      try {
+        typesCache = await invoke<{ type_id: string; name: string; color: string }[]>("list_types");
+      } catch {
+        typesCache = [];
+      }
+    }
+    const t2 = activeTrigger(); // re-validate after await
+    if (!t2 || t2.trigger !== "//" || t2.start !== t.start) return;
+    const q = t2.query.toLowerCase();
+    const petItems: PickItem[] = pets
+      .filter((p) => p.name.toLowerCase().includes(q) || p.handle.toLowerCase().includes(q))
+      .map((p) => ({ insert: "//" + p.handle + " ", label: p.name, hint: "//" + p.handle, mentionId: p.id }));
+    const newItems: PickItem[] = (typesCache ?? [])
+      .filter((ty) => ("new " + ty.name).toLowerCase().includes(q) || ty.type_id.includes(q))
+      .map((ty) => ({ insert: "", label: "➕ New " + ty.name, hint: "new session", newType: ty.type_id }));
+    items = [...petItems, ...newItems].slice(0, 12);
   } else {
     const q = t.query.toLowerCase();
     items = (cmdsByInstance.get(pet.id) ?? [])
@@ -603,16 +674,34 @@ async function refreshPicker() {
   renderPicker();
 }
 
-function selectItem(i: number) {
+async function selectItem(i: number) {
   if (!picker) return;
   const it = picker.items[i];
+  const tokenStart = picker.tokenStart;
+  let insert = it.insert;
+  if (it.newType) {
+    // Spawn a new session (in the last-used folder) and target it.
+    try {
+      const cwd = localStorage.getItem("agpet.cwd.last");
+      const id = await invoke<string>("launch_instance", { kind: it.newType, cwd: cwd || null });
+      mentionedAgents.set(id, id);
+      insert = "//" + id + " ";
+    } catch (e) {
+      showToast(`Launch failed: ${e}`);
+      hidePicker();
+      return;
+    }
+  } else if (it.mentionId) {
+    mentionedAgents.set(it.insert.slice(2).trim(), it.mentionId); // handle -> id
+  } else if (it.file) {
+    mentionedFiles.add(it.file);
+  }
   const pos = inputEl.selectionStart ?? inputEl.value.length;
-  const before = inputEl.value.slice(0, picker.tokenStart);
+  const before = inputEl.value.slice(0, tokenStart);
   const after = inputEl.value.slice(pos);
-  inputEl.value = before + it.insert + after;
-  const caret = before.length + it.insert.length;
+  inputEl.value = before + insert + after;
+  const caret = before.length + insert.length;
   inputEl.setSelectionRange(caret, caret);
-  if (it.file) mentionedFiles.add(it.file);
   hidePicker();
   inputEl.focus();
 }
@@ -655,19 +744,42 @@ inputEl.addEventListener("paste", (e) => {
 });
 
 function sendPrompt() {
-  const pet = selectedPet();
+  const cur = selectedPet();
   const text = inputEl.value.trim();
-  if (!pet || (!text && pendingImages.length === 0)) return;
+  if (!cur || (!text && pendingImages.length === 0)) return;
   // Only attach files still referenced in the text (the user may have deleted some).
   const files = [...mentionedFiles].filter((f) => text.includes("@" + f));
   const images = pendingImages.map((i) => ({ mime: i.mime, data: i.data }));
-  addMsgTo(pet, "user", text || `📎 ${images.length} image${images.length > 1 ? "s" : ""}`);
-  resetTurn(pet);
-  pet.currentPlan = null; // a new turn gets a fresh plan block
-  invoke("send_prompt", { instance: pet.id, text, files, images }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
+
+  // Resolve //handle mentions → target instance ids; no mention = current pet.
+  const targets: string[] = [];
+  const re = /\/\/([\w-]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const handle = m[1];
+    const id = mentionedAgents.get(handle) ?? pets.find((p) => p.handle === handle)?.id;
+    if (id && !targets.includes(id)) targets.push(id);
+  }
+  const recipients = targets.length ? targets : [cur.id];
+
+  const label = text || `📎 ${images.length} image${images.length > 1 ? "s" : ""}`;
+  for (const id of recipients) {
+    const p = petById.get(id);
+    if (p) {
+      addMsgTo(p, "user", label); // shows in that pet's transcript
+      resetTurn(p);
+      p.currentPlan = null; // a new turn gets a fresh plan block
+    }
+    invoke("send_prompt", { instance: id, text, files, images }).catch((e) => {
+      if (p) addMsgTo(p, "system", `send failed: ${e}`);
+    });
+  }
+  if (targets.length) showToast(`Sent to ${recipients.length} agent${recipients.length > 1 ? "s" : ""}`);
+
   inputEl.value = "";
   inputEl.style.height = "auto"; // collapse back to one line
   mentionedFiles.clear();
+  mentionedAgents.clear();
   pendingImages.length = 0;
   renderAttachStrip();
   hidePicker();
@@ -812,6 +924,7 @@ function addPet(info: InstanceInfo) {
   const pet: Pet = {
     id: info.instance_id,
     name: info.name,
+    handle: info.instance_id, // default mention handle = id; rename overrides
     color: info.color,
     x: -1, // assigned by layoutPets
     customY: -1, // roaming height; -1 = default baseline, set by dragging
@@ -834,6 +947,15 @@ function addPet(info: InstanceInfo) {
     try {
       const { y } = JSON.parse(savedPos);
       if (typeof y === "number") pet.customY = y; // walk at the saved height
+    } catch {}
+  }
+  // Restore a custom name from a previous run (same best-effort id keying).
+  const savedName = localStorage.getItem("agpet.name." + pet.id);
+  if (savedName) {
+    try {
+      const { name, handle } = JSON.parse(savedName);
+      if (name) pet.name = name;
+      if (handle) pet.handle = handle;
     } catch {}
   }
   pets.push(pet);
