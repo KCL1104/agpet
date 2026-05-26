@@ -2,8 +2,9 @@
 //!
 //! While click-through is on, the webview gets no mouse events, so the backend
 //! polls the global cursor and toggles `set_ignore_cursor_events`: the window is
-//! interactive only while the cursor is over *some* pet (rects reported by the
-//! frontend) or the chat panel is open; otherwise clicks pass through.
+//! interactive only while the cursor is over *some* reported rect — a pet or an
+//! open panel (both reported by the frontend) — or while a drag is in progress;
+//! otherwise clicks pass through to the desktop.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-/// A pet bounding box in CSS pixels relative to the window.
+/// An interactive bounding box (pet or open panel) in CSS pixels relative to
+/// the window.
 #[derive(Clone, Copy)]
 pub struct PetRect {
     pub x: f64,
@@ -22,7 +24,8 @@ pub struct PetRect {
     pub h: f64,
 }
 
-/// Frontend payload for reporting a pet rect (with its agent id).
+/// Frontend payload for reporting an interactive rect (pet instance id or a
+/// synthetic panel id like `__panel:chat`).
 #[derive(Deserialize)]
 pub struct PetRectInput {
     pub id: String,
@@ -34,9 +37,9 @@ pub struct PetRectInput {
 
 pub struct OverlayState {
     pub pet_rects: Mutex<HashMap<String, PetRect>>,
-    pub panel_open: AtomicBool,
-    /// True while the user is dragging a pet. Forces the window interactive so a
-    /// fast drag can't outrun the (33ms-stale) pet rect and flip click-through on.
+    /// True while the user is dragging a pet or the chat panel. Forces the window
+    /// interactive so a fast drag can't outrun the (≤40ms-stale) rect and flip
+    /// click-through on mid-gesture.
     pub dragging: AtomicBool,
 }
 
@@ -44,7 +47,6 @@ impl OverlayState {
     pub fn new() -> Self {
         Self {
             pet_rects: Mutex::new(HashMap::new()),
-            panel_open: AtomicBool::new(false),
             dragging: AtomicBool::new(false),
         }
     }
@@ -75,10 +77,9 @@ pub fn spawn_clickthrough_loop(app: AppHandle) {
         loop {
             std::thread::sleep(Duration::from_millis(33));
             let state = app.state::<OverlayState>();
-            let panel_open = state.panel_open.load(Ordering::Relaxed);
             let dragging = state.dragging.load(Ordering::Relaxed);
-            let over_pet = !panel_open && !dragging && cursor_over_any_pet(&window, &state);
-            let desired_ignore = !(panel_open || dragging || over_pet);
+            let over = !dragging && cursor_over_any_rect(&window, &state);
+            let desired_ignore = !(dragging || over);
             if desired_ignore != current_ignore {
                 match window.set_ignore_cursor_events(desired_ignore) {
                     Ok(()) => current_ignore = desired_ignore,
@@ -89,7 +90,7 @@ pub fn spawn_clickthrough_loop(app: AppHandle) {
     });
 }
 
-fn cursor_over_any_pet(window: &WebviewWindow, state: &OverlayState) -> bool {
+fn cursor_over_any_rect(window: &WebviewWindow, state: &OverlayState) -> bool {
     let (Ok(cursor), Ok(origin), Ok(scale)) = (
         window.cursor_position(),
         window.outer_position(),

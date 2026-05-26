@@ -96,13 +96,11 @@ const workflowClose = document.getElementById("workflow-close") as HTMLButtonEle
 const workflowList = document.getElementById("workflow-list") as HTMLDivElement;
 const toastEl = document.getElementById("toast") as HTMLDivElement;
 
-// The window is interactive whenever the chat / launcher / workflow panel is open.
+// Panels now report their bounding rect to the overlay (see reportRects) so only
+// the panel area blocks clicks — not the whole screen. Opening/closing a panel
+// nudges an immediate rect refresh so interactivity tracks within one frame.
 function updatePanelOpen() {
-  const open =
-    !panel.classList.contains("hidden") ||
-    !launcherPanel.classList.contains("hidden") ||
-    !workflowPanel.classList.contains("hidden");
-  invoke("set_panel_open", { open }).catch(() => {});
+  lastRectSent = 0;
 }
 
 let toastTimer = 0;
@@ -374,6 +372,7 @@ let dragOff = { x: 0, y: 0 };
 headerEl.addEventListener("pointerdown", (e) => {
   if ((e.target as HTMLElement).closest("button")) return;
   dragging = true;
+  invoke("set_dragging", { dragging: true }).catch(() => {});
   const r = panel.getBoundingClientRect();
   dragOff = { x: e.clientX - r.left, y: e.clientY - r.top };
   panel.style.right = "auto";
@@ -392,6 +391,7 @@ headerEl.addEventListener("pointermove", (e) => {
 headerEl.addEventListener("pointerup", (e) => {
   if (!dragging) return;
   dragging = false;
+  invoke("set_dragging", { dragging: false }).catch(() => {});
   headerEl.releasePointerCapture(e.pointerId);
   savePanelBox();
 });
@@ -399,6 +399,7 @@ let resizing = false;
 let rs = { mx: 0, my: 0, right: 0, bottom: 0 };
 resizeHandle.addEventListener("pointerdown", (e) => {
   resizing = true;
+  invoke("set_dragging", { dragging: true }).catch(() => {});
   const r = panel.getBoundingClientRect();
   rs = { mx: e.clientX, my: e.clientY, right: r.right, bottom: r.bottom };
   panel.style.right = "auto";
@@ -418,6 +419,7 @@ resizeHandle.addEventListener("pointermove", (e) => {
 resizeHandle.addEventListener("pointerup", (e) => {
   if (!resizing) return;
   resizing = false;
+  invoke("set_dragging", { dragging: false }).catch(() => {});
   resizeHandle.releasePointerCapture(e.pointerId);
   savePanelBox();
 });
@@ -798,14 +800,37 @@ function petBox(pet: Pet) {
   return { x: pet.x - 8, y: baselineY - 40, w: PET_W + 16, h: PET_H + 90 };
 }
 
+// Bounding rects of any open panels, so the overlay keeps just those areas
+// interactive (synthetic ids can't collide with instance ids).
+function openPanelRects() {
+  const panels: [string, HTMLElement][] = [
+    ["__panel:chat", panel],
+    ["__panel:launcher", launcherPanel],
+    ["__panel:workflow", workflowPanel],
+  ];
+  return panels
+    .filter(([, el]) => !el.classList.contains("hidden"))
+    .map(([id, el]) => {
+      const r = el.getBoundingClientRect();
+      return { id, x: r.left, y: r.top, w: r.width, h: r.height };
+    });
+}
+
 let lastRectSent = 0;
+let lastWasEmpty = false;
 function reportRects(now: number) {
-  if (now - lastRectSent < 40 || pets.length === 0) return;
+  if (now - lastRectSent < 40) return;
+  const panelRects = openPanelRects();
+  const empty = pets.length === 0 && panelRects.length === 0;
+  if (empty && lastWasEmpty) return; // nothing on screen: stay quiet
   lastRectSent = now;
-  const rects = pets.map((p) => {
-    const b = petBox(p);
-    return { id: p.id, x: b.x, y: b.y, w: b.w, h: b.h };
-  });
+  lastWasEmpty = empty;
+  const rects = pets
+    .map((p) => {
+      const b = petBox(p);
+      return { id: p.id, x: b.x, y: b.y, w: b.w, h: b.h };
+    })
+    .concat(panelRects);
   invoke("update_pet_rects", { rects }).catch(() => {});
 }
 

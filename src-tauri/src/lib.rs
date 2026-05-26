@@ -119,12 +119,7 @@ fn update_pet_rects(rects: Vec<PetRectInput>, state: tauri::State<'_, OverlaySta
     state.set_rects(rects);
 }
 
-#[tauri::command]
-fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
-    state.panel_open.store(open, Ordering::Relaxed);
-}
-
-/// Keep the window interactive while a pet is being dragged.
+/// Keep the window interactive while a pet or the chat panel is being dragged.
 #[tauri::command]
 fn set_dragging(dragging: bool, state: tauri::State<'_, OverlayState>) {
     state.dragging.store(dragging, Ordering::Relaxed);
@@ -152,7 +147,6 @@ pub fn run() {
             run_workflow,
             list_sessions,
             update_pet_rects,
-            set_panel_open,
             set_dragging
         ])
         .setup(|app| {

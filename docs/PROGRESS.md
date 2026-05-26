@@ -187,9 +187,19 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
   - **label 防重疊**：label 改第二趟 `drawLabels()` 繪製，依 x 排序、與已放置 label 重疊時上移一列，避免名稱互蓋。
   - **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：拖曳順手不掉穿透、放開停住、輕點仍開面板、寵物聚集時 label 可讀。
 
+## 面板點擊穿透修正 ✅ 完成（待目視驗證）
+
+- **問題**：先前只要任一面板（chat/launcher/workflow）開著，`panel_open` 就把**整個畫面**設為可互動 → 開聊天時點不到桌面/其他 app。
+- **做法**：改成**回報「開啟中面板的矩形」**給 overlay，跟寵物矩形一視同仁 hit-test，**只有面板（+ 寵物）擋點擊**，其餘透明區照常穿透。
+  - `overlay.rs`：拿掉 `panel_open` 一刀切；`desired_ignore = !(dragging || over)`，`over` 來自 `cursor_over_any_rect`（含面板矩形）。移除 `panel_open` 欄位；`lib.rs` 移除 `set_panel_open` command。
+  - `main.ts`：`openPanelRects()` 取各未隱藏面板的 `getBoundingClientRect()`（合成 id `__panel:*`）併入 `reportRects`；修掉「無寵物就 early-return」（空桌開 launcher 也要能點）並用 `lastWasEmpty` 在全部關閉時清一次後台矩形。`updatePanelOpen()` 改成 `lastRectSent=0`（下一幀即時刷新，免新 command）。
+  - **面板拖曳/縮放護欄**：header 與 resize 的 pointerdown/up 加 `set_dragging(true/false)`（沿用既有旗標），避免快速拖曳時游標跑出過期矩形而中斷（原本靠 `panel_open` 蓋住，現改用 dragging）。
+  - `#settings-popover` 是 `#chat-panel` 子元素且在其框內 → 被 chat 面板矩形涵蓋，免另回報。
+- **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：開聊天時面板外透明區可點桌面、面板內/寵物照常可點；空桌開 launcher 仍可選資料夾+Launch；打字時游標移出面板不中斷；拖/縮面板不掉穿透；全關後桌面完全穿透。
+
 ## 下一步（新對話接手）
 
-- **Antigravity CLI**（本批延後）：先確認其 ACP stdio 指令（docs 未明朗；Gemini CLI 是 `gemini --experimental-acp`），確認後加進 `config.rs` 預設 + agents.toml（config-only）。
+- **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。
 - （進階、可選）workflow 步驟間「同檔衝突鎖」：第二個 workflow 要動同檔時等第一個完成。
 - 拖動位置**跨重啟不保留**（instance id 每次重生）—— 若要保留需改用穩定鍵持久化。
 
