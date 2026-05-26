@@ -57,9 +57,10 @@ fn send_prompt(
     instance: String,
     text: String,
     files: Vec<String>,
+    images: Vec<acp::PromptImage>,
     state: tauri::State<'_, acp::AcpManager>,
 ) -> Result<(), String> {
-    state.send_prompt(&instance, text, files)
+    state.send_prompt(&instance, text, files, images)
 }
 
 /// Files under an instance's working dir, for the chat `@`-mention picker.

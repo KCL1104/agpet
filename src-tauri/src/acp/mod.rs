@@ -26,11 +26,18 @@ pub use config::{AgentDef, AgentsConfig};
 
 use crate::db::Db;
 
+/// A pasted image to attach to a prompt (base64 data + MIME type).
+#[derive(Clone, serde::Deserialize)]
+pub struct PromptImage {
+    pub mime: String,
+    pub data: String,
+}
+
 /// Commands sent into a live instance's connection.
 pub enum AcpCommand {
     /// User prompt text plus any @-mentioned files (cwd-relative paths) to
-    /// attach as ACP resource links.
-    Prompt { text: String, files: Vec<String> },
+    /// attach as ACP resource links, and any pasted images.
+    Prompt { text: String, files: Vec<String>, images: Vec<PromptImage> },
     NewSession,
     Resume(String),
     SetMode(String),
@@ -292,8 +299,8 @@ impl AcpManager {
             .map_err(|_| format!("instance {instance_id} is not running"))
     }
 
-    pub fn send_prompt(&self, instance_id: &str, text: String, files: Vec<String>) -> Result<(), String> {
-        self.send(instance_id, AcpCommand::Prompt { text, files })
+    pub fn send_prompt(&self, instance_id: &str, text: String, files: Vec<String>, images: Vec<PromptImage>) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::Prompt { text, files, images })
     }
 
     /// Cancel the in-flight prompt turn on an instance (out-of-band signal).

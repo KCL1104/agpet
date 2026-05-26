@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, ModelId, NewSessionRequest, PromptRequest,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResourceLink, SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification,
-    SetSessionModeRequest, SetSessionModelRequest, TextContent,
+    CancelNotification, ContentBlock, ImageContent, InitializeRequest, ModelId, NewSessionRequest,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionId, SessionModeId,
+    SessionNotification, SetSessionModeRequest, SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
@@ -257,7 +257,7 @@ pub fn start(
                 let mut cancel_rx = cancel_rx;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        AcpCommand::Prompt { text, files } => {
+                        AcpCommand::Prompt { text, files, images } => {
                             let ctx = ctx_main.lock().ok().and_then(|mut g| g.take());
                             let full_text = match &ctx {
                                 Some(c) => format!("{c}\n\n---\n\nUser: {text}"),
@@ -275,6 +275,9 @@ pub fn start(
                             for rel in &files {
                                 let uri = file_uri(&cwd_main.join(rel));
                                 blocks.push(ContentBlock::ResourceLink(ResourceLink::new(rel.clone(), uri)));
+                            }
+                            for img in &images {
+                                blocks.push(ContentBlock::Image(ImageContent::new(img.data.clone(), img.mime.clone())));
                             }
                             let req = PromptRequest::new(acp_session.clone(), blocks);
                             // Drop any stale cancel signals (e.g. Stop pressed while idle),
@@ -562,6 +565,7 @@ fn chat_event(notification: &SessionNotification) -> Option<serde_json::Value> {
             "kind": "commands",
             "commands": update.get("availableCommands"),
         })),
+        "current_mode_update" => Some(json!({ "kind": "mode", "mode_id": update.get("currentModeId") })),
         _ => None,
     }
 }

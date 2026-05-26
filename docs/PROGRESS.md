@@ -222,6 +222,12 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **Plan 清單**：`plan` 事件帶 `entries`；前端 `renderPlan` 就地更新 `.plan`（⬜/⏳/✅），`Pet.currentPlan` 每回合重置。
 - **編譯**：`cargo check`（含 tokio macros）+ `tsc` 通過；dev 實測中。註：diff/plan 是否顯示取決於 adapter 是否送對應 update（指令清單確定有）。
 
+## 貼圖 + mode 同步 ✅ 完成（實測中）
+
+ACP 盤點裡「值得做」的兩項：
+- **貼圖（`ContentBlock::Image`）**：聊天輸入框 **Ctrl+V 貼上圖片** → 輸入框上方出現縮圖列（可 × 移除）；送出時夾帶。後端 `PromptImage{mime,data(base64)}`、`AcpCommand::Prompt` 加 `images`、`send_prompt(...,images)`、Prompt arm push `ContentBlock::Image(ImageContent::new(data,mime))`。前端 `paste` 事件 → `FileReader` 取 base64 data URL、`pendingImages` + `renderAttachStrip`、`sendPrompt` 夾帶並允許「只有圖片無文字」也能送。⚠️ 需 agent 宣告 `promptCapabilities.image`（Claude 支援）。
+- **`current_mode_update` 同步**：`chat_event` 轉發 `{kind:"mode",mode_id}`；前端更新 `cfg.modes.currentModeId` + 即時設定 ⚙ 的 mode 下拉，讓 agent 自己換 mode 時面板跟著動。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。

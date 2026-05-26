@@ -72,6 +72,7 @@ const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
 const filePicker = document.getElementById("file-picker") as HTMLDivElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
 const stopBtn = document.getElementById("chat-stop") as HTMLButtonElement;
+const attachStrip = document.getElementById("attach-strip") as HTMLDivElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
 const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
@@ -615,18 +616,58 @@ function selectItem(i: number) {
   inputEl.focus();
 }
 
+// Pasted images pending on the current draft (base64 + mime, data URL for thumb).
+const pendingImages: { mime: string; data: string; url: string }[] = [];
+
+function renderAttachStrip() {
+  attachStrip.innerHTML = "";
+  if (pendingImages.length === 0) { attachStrip.classList.add("hidden"); return; }
+  pendingImages.forEach((img, i) => {
+    const thumb = document.createElement("div");
+    thumb.className = "attach-thumb";
+    thumb.innerHTML = `<img src="${img.url}" alt="" /><button class="rm" title="Remove">×</button>`;
+    thumb.querySelector(".rm")!.addEventListener("click", () => {
+      pendingImages.splice(i, 1);
+      renderAttachStrip();
+    });
+    attachStrip.appendChild(thumb);
+  });
+  attachStrip.classList.remove("hidden");
+}
+
+inputEl.addEventListener("paste", (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const it of items) {
+    if (!it.type.startsWith("image/")) continue;
+    const blob = it.getAsFile();
+    if (!blob) continue;
+    e.preventDefault();
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result as string; // data:<mime>;base64,<DATA>
+      pendingImages.push({ mime: blob.type, data: url.slice(url.indexOf(",") + 1), url });
+      renderAttachStrip();
+    };
+    reader.readAsDataURL(blob);
+  }
+});
+
 function sendPrompt() {
   const pet = selectedPet();
   const text = inputEl.value.trim();
-  if (!pet || !text) return;
+  if (!pet || (!text && pendingImages.length === 0)) return;
   // Only attach files still referenced in the text (the user may have deleted some).
   const files = [...mentionedFiles].filter((f) => text.includes("@" + f));
-  addMsgTo(pet, "user", text);
+  const images = pendingImages.map((i) => ({ mime: i.mime, data: i.data }));
+  addMsgTo(pet, "user", text || `📎 ${images.length} image${images.length > 1 ? "s" : ""}`);
   resetTurn(pet);
   pet.currentPlan = null; // a new turn gets a fresh plan block
-  invoke("send_prompt", { instance: pet.id, text, files }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
+  invoke("send_prompt", { instance: pet.id, text, files, images }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
   mentionedFiles.clear();
+  pendingImages.length = 0;
+  renderAttachStrip();
   hidePicker();
 }
 
@@ -836,6 +877,7 @@ interface ChatEvent {
   diff?: { path?: string | null; old?: string | null; new?: string | null } | null;
   entries?: { content: string; status: string; priority?: string }[] | null;
   commands?: { name: string; description: string }[] | null;
+  mode_id?: string | null;
 }
 
 function toolIcon(kind?: string | null): string {
@@ -977,6 +1019,13 @@ listen<ChatEvent>("chat-event", (event) => {
     }
     case "commands": {
       if (ev.commands) cmdsByInstance.set(ev.instance_id, ev.commands);
+      break;
+    }
+    case "mode": {
+      if (ev.mode_id) {
+        if (pet.cfg?.modes) pet.cfg.modes.currentModeId = ev.mode_id; // so the popover reopens correct
+        if (pet.id === selected) setModeSel.value = ev.mode_id; // live-update if popover open
+      }
       break;
     }
   }
