@@ -1,6 +1,7 @@
 mod acp;
 mod db;
 mod git;
+mod mcp;
 mod overlay;
 mod tray;
 
@@ -51,6 +52,19 @@ fn close_instance(
 #[tauri::command]
 fn retry_agent(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
     state.retry(&instance)
+}
+
+/// Rename an instance (so delegate/tray see the friendly name).
+#[tauri::command]
+fn rename_instance(
+    instance: String,
+    name: String,
+    state: tauri::State<'_, acp::AcpManager>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    state.rename(&instance, name)?;
+    tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -199,6 +213,7 @@ pub fn run() {
             launch_instance,
             close_instance,
             retry_agent,
+            rename_instance,
             send_prompt,
             list_dir_files,
             cancel_prompt,
@@ -242,10 +257,17 @@ pub fn run() {
                 tracing::info!("session DB: {}", db_path.display());
                 let config = acp::AgentsConfig::load(app.handle())?;
                 tracing::info!("loaded {} agent type(s)", config.agents.len());
+                // Start agpet's MCP delegate server first so its URL can be
+                // attached to each agent session.
+                let mcp_url = match mcp::start(app.handle().clone()) {
+                    Ok(url) => { tracing::info!("MCP delegate server: {url}"); Some(url) }
+                    Err(e) => { tracing::error!("MCP server failed to start: {e:#}"); None }
+                };
                 let manager = acp::AcpManager::new(
                     std::sync::Arc::new(database),
                     &config,
                     app.handle().clone(),
+                    mcp_url,
                 );
                 // Start with an empty desktop; the user launches instances (with a
                 // working dir) from the launcher panel via the tray.

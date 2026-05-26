@@ -251,6 +251,21 @@ prompt 內有 `//標註` → send 時跳 **平行 / 垂直 / 廣播** 選單；�
 - 分支命名 `agpet/<task-slug>/<type>`（平行）或 `agpet/<task-slug>`（垂直）；worktree 放 `<repo>/.agpet-worktrees/`，**保留**讓你手動 review/merge。
 - **驗證**：`cargo check` + `tsc` 通過；`git worktree add/list/remove` 在臨時 repo 實測序列正確。**待目視**：平行各自分支、垂直 📦 接力、面板清理。caveat：合併回主線是手動；worker 不顯示 user 泡泡（直接看 agent 回覆）。
 
+## Markdown 渲染 ✅ 完成（已 push）
+
+- agent / thinking 泡泡改 markdown：加 `marked` + `dompurify`，`renderMarkdown(el,raw)=DOMPurify.sanitize(marked.parse(raw))`；串流時把累積原文存 `el.dataset.raw` 每 chunk 重渲染（泡泡加 `md` class）。user 泡泡與 `.tool-out` 維持純文字。`styles.css` 加 `.msg.md` 內 code/pre/list/link/table/blockquote 樣式。
+
+## 母 agent 編排（MCP delegate 工具）✅ 完成（實測中）
+
+讓「目前選取的母 agent」收到整段 prompt、自己用 `delegate` 工具把子任務分派給其他 agent（可選擇等結果）。
+- **可行性**（已查證）：`NewSessionRequest.mcp_servers` 可由 client 帶 MCP server；claude-agent-acp 宣告 `mcpCapabilities.http:true` 並會連 client 提供的 HTTP MCP server；`rmcp` 1.7 已在依賴樹、可跑 server（HTTP/streamable）。
+- **agpet 內建 MCP server**（新 `src-tauri/src/mcp.rs`，`rmcp` + `axum`）：`setup` 時在 `127.0.0.1:<port>/mcp` 起一個 `StreamableHttpService`，工具 `list_agents()`、`delegate(agent, task, wait?)`；handler 持 `AppHandle`、用 `app.state::<AcpManager>()` 路由。
+- **路由 + 防死結**（`acp/mod.rs`）：`AcpManager::delegate(agent,task,wait)` 以名稱(忽略大小寫)/id 找 instance、送 `RunStep`、`wait` 就 await 回傳輸出否則立即回「dispatched」。每 instance 加 `busy: AtomicBool`（client.rs Prompt/RunStep 進出時設），**delegate 拒絕 busy 目標** → 母 agent 自己 busy 故不會被回頭委派、避免 A→B→A 死結。
+- **session 接線**（`client.rs`）：`session/new` 若 agent 有 `mcpCapabilities.http` 就帶 `McpServer::Http("agpet", url)`。
+- **後端改名**（`rename_instance` command + `AcpManager::rename`）：前端改名同步到後端 `Instance.name`（delegate 解析名稱 + tray 一致）；`addPet` 還原自訂名也同步。
+- **前端**：`#send-modes` 加第 4 個 **🧠 Orchestrate**＝把整段 prompt（+可委派名單註記）送給目前母 agent，由它呼叫 `delegate`。
+- **驗證**：`cargo check`（含 rmcp+axum）+ `tsc` 通過；MCP server 實測會啟動（log 印出 url）。**待使用者實測**：母 agent 是否真的呼叫 delegate、子 agent 在各自面板跑、wait 時母 agent 收到結果。caveat：localhost 無 token（之後可加）；delegate 跨 worktree 尚未整合。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。

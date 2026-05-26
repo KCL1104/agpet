@@ -96,6 +96,9 @@ struct Instance {
     config: Arc<Mutex<serde_json::Value>>,
     /// The connection task; aborted on reload/close to kill a hung adapter.
     task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// True while this instance is mid-turn — `delegate` refuses busy targets to
+    /// avoid deadlocking (e.g. the orchestrating "mother", or a delegation cycle).
+    busy: Arc<AtomicBool>,
 }
 
 pub struct AcpManager {
@@ -109,10 +112,13 @@ pub struct AcpManager {
     /// True while a workflow run is in flight; serializes runs so two workflows
     /// can't interleave prompts on the same agent instance.
     workflow_running: Arc<AtomicBool>,
+    /// agpet's MCP server URL (delegate tool); attached to sessions that support
+    /// HTTP MCP. None if the server failed to start.
+    mcp_url: Option<String>,
 }
 
 impl AcpManager {
-    pub fn new(db: Arc<Db>, config: &AgentsConfig, app: AppHandle) -> Self {
+    pub fn new(db: Arc<Db>, config: &AgentsConfig, app: AppHandle, mcp_url: Option<String>) -> Self {
         Self {
             instances: Arc::new(Mutex::new(Vec::new())),
             next_n: Mutex::new(HashMap::new()),
@@ -122,6 +128,7 @@ impl AcpManager {
             cwd: config.cwd.clone(),
             log_dir: config.log_dir.clone(),
             workflow_running: Arc::new(AtomicBool::new(false)),
+            mcp_url,
         }
     }
 
@@ -160,6 +167,7 @@ impl AcpManager {
         let status = Arc::new(Mutex::new(AcpStatus::Connecting));
         let pending: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
         let cfg = Arc::new(Mutex::new(serde_json::Value::Null));
+        let busy = Arc::new(AtomicBool::new(false));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
 
@@ -175,6 +183,7 @@ impl AcpManager {
             pending: pending.clone(),
             config: cfg.clone(),
             task: None,
+            busy: busy.clone(),
         });
 
         let log_path = self.log_dir.join(format!("acp-messages-{instance_id}.jsonl"));
@@ -191,6 +200,8 @@ impl AcpManager {
             pending,
             self.db.clone(),
             cfg,
+            busy,
+            self.mcp_url.clone(),
         );
         if let Ok(mut insts) = self.instances.lock() {
             if let Some(inst) = insts.iter_mut().find(|i| i.instance_id == instance_id) {
@@ -223,7 +234,7 @@ impl AcpManager {
 
     /// Restart a (stopped/errored) instance's connection, keeping its id.
     pub fn retry(&self, instance_id: &str) -> Result<(), String> {
-        let (type_id, cwd_path, status, pending, cfg, cmd_rx, cancel_rx) = {
+        let (type_id, cwd_path, status, pending, cfg, busy, cmd_rx, cancel_rx) = {
             let mut insts = self.instances.lock().unwrap();
             let inst = insts
                 .iter_mut()
@@ -233,6 +244,7 @@ impl AcpManager {
             let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
             inst.cmd_tx = Some(cmd_tx); // dropping the old sender stops the old loop
             inst.cancel_tx = Some(cancel_tx);
+            inst.busy.store(false, Ordering::SeqCst);
             if let Some(h) = inst.task.take() {
                 h.abort(); // kill the old task — handles the stuck-on-connecting case
             }
@@ -245,6 +257,7 @@ impl AcpManager {
                 inst.status.clone(),
                 inst.pending.clone(),
                 inst.config.clone(),
+                inst.busy.clone(),
                 cmd_rx,
                 cancel_rx,
             )
@@ -269,6 +282,8 @@ impl AcpManager {
             pending,
             self.db.clone(),
             cfg,
+            busy,
+            self.mcp_url.clone(),
         );
         if let Ok(mut insts) = self.instances.lock() {
             if let Some(inst) = insts.iter_mut().find(|i| i.instance_id == instance_id) {
@@ -331,6 +346,49 @@ impl AcpManager {
             .and_then(|insts| insts.iter().find(|i| i.instance_id == instance_id).and_then(|i| i.cancel_tx.clone()))
             .ok_or_else(|| format!("instance {instance_id} is not running"))?;
         tx.send(()).map_err(|_| format!("instance {instance_id} is not running"))
+    }
+
+    /// Rename an instance (display name; also how `delegate` resolves a target).
+    pub fn rename(&self, instance_id: &str, name: String) -> Result<(), String> {
+        let mut insts = self.instances.lock().map_err(|_| "lock poisoned".to_string())?;
+        let inst = insts
+            .iter_mut()
+            .find(|i| i.instance_id == instance_id)
+            .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
+        inst.name = name;
+        Ok(())
+    }
+
+    /// Delegate a task to another running agent (by name, case-insensitive, or
+    /// id). With `wait`, returns its turn output; else dispatches and returns at
+    /// once. Refuses **busy** targets so a blocked orchestrator / delegation
+    /// cycle can't deadlock.
+    pub async fn delegate(&self, agent: &str, task: String, wait: bool) -> Result<String, String> {
+        let (id, tx) = {
+            let insts = self.instances.lock().map_err(|_| "lock poisoned".to_string())?;
+            let inst = insts
+                .iter()
+                .find(|i| i.instance_id == agent || i.name.eq_ignore_ascii_case(agent))
+                .ok_or_else(|| format!("no running agent named '{agent}'"))?;
+            if inst.busy.load(Ordering::SeqCst) {
+                return Err(format!("agent '{}' is busy — try again once it's idle", inst.name));
+            }
+            let tx = inst
+                .cmd_tx
+                .clone()
+                .ok_or_else(|| format!("agent '{}' is not running", inst.name))?;
+            (inst.instance_id.clone(), tx)
+        };
+        let (rtx, rrx) = oneshot::channel::<Result<String, String>>();
+        tx.send(AcpCommand::RunStep { text: task, reply: rtx })
+            .map_err(|_| format!("agent '{id}' stopped"))?;
+        if !wait {
+            return Ok(format!("dispatched to {id}"));
+        }
+        match rrx.await {
+            Ok(r) => r,
+            Err(_) => Err(format!("agent '{id}' did not reply")),
+        }
     }
     pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
         self.send(instance_id, AcpCommand::NewSession)

@@ -534,6 +534,7 @@ function renamePet(pet: Pet, raw: string) {
   if (pets.some((p) => p.id !== pet.id && p.handle === h)) h = `${h}-${pet.id}`; // keep unique
   pet.handle = h;
   localStorage.setItem("agpet.name." + pet.id, JSON.stringify({ name: pet.name, handle: pet.handle }));
+  invoke("rename_instance", { instance: pet.id, name: pet.name }).catch(() => {}); // so delegate/tray resolve it
   if (pet.id === selected) refreshHeader();
 }
 
@@ -880,7 +881,23 @@ async function dispatchWorktree(mode: "parallel" | "vertical", targets: Target[]
   }
 }
 
-// When //mentions are present, ask Parallel / Vertical / Broadcast before sending.
+// Orchestrate: hand the whole prompt to the CURRENT pet (the "mother"); it uses
+// the `delegate` tool to farm subtasks out to the mentioned agents + does its own.
+function dispatchOrchestrate(targets: Target[], text: string, files: string[], images: ImgPayload[]) {
+  const cur = selectedPet();
+  if (!cur) return;
+  const names = targets.map((t) => petById.get(t.id)?.name).filter((n): n is string => !!n);
+  const note = names.length
+    ? `\n\n(You can delegate subtasks to these agents with the \`delegate\` tool: ${names.join(", ")}. Do your own part directly.)`
+    : "";
+  addMsgTo(cur, "user", text); // show the original prompt in the mother's transcript
+  resetTurn(cur);
+  cur.currentPlan = null;
+  invoke("send_prompt", { instance: cur.id, text: text + note, files, images })
+    .catch((e) => addMsgTo(cur, "system", `send failed: ${e}`));
+}
+
+// When //mentions are present, ask Orchestrate / Parallel / Vertical / Broadcast.
 let pendingSend: { targets: Target[]; text: string; files: string[]; images: ImgPayload[] } | null = null;
 function hideSendModes() { sendModes.classList.add("hidden"); pendingSend = null; }
 sendModes.querySelectorAll("button").forEach((b) => {
@@ -890,7 +907,8 @@ sendModes.querySelectorAll("button").forEach((b) => {
     const d = pendingSend;
     hideSendModes();
     if (!d) return;
-    if (mode === "broadcast") dispatchBroadcast(d.targets.map((t) => t.id), d.text, d.files, d.images);
+    if (mode === "orchestrate") dispatchOrchestrate(d.targets, d.text, d.files, d.images);
+    else if (mode === "broadcast") dispatchBroadcast(d.targets.map((t) => t.id), d.text, d.files, d.images);
     else void dispatchWorktree(mode as "parallel" | "vertical", d.targets, d.text, d.files, d.images);
     clearDraft();
   });
@@ -1083,7 +1101,7 @@ function addPet(info: InstanceInfo) {
   if (savedName) {
     try {
       const { name, handle } = JSON.parse(savedName);
-      if (name) pet.name = name;
+      if (name) { pet.name = name; invoke("rename_instance", { instance: pet.id, name }).catch(() => {}); }
       if (handle) pet.handle = handle;
     } catch {}
   }

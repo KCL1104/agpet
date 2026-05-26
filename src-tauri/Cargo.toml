@@ -42,3 +42,10 @@ toml = "0.8"
 # User-editable workflows (M3 Slice 2b). serde_yaml is archived but stable.
 serde_yaml = "0.9"
 
+# Inter-agent orchestration: agpet runs an MCP server exposing a `delegate` tool
+# that agents (esp. the "mother") can call. rmcp is already in the tree via ACP.
+rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+schemars = "1"
+axum = "0.8"
+tokio-util = "0.7"
+

@@ -3,14 +3,15 @@
 //! accept prompts, route permission requests, persist sessions (keyed by type
 //! id), and publish agent config (auth methods / models / modes).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, ImageContent, InitializeRequest, ModelId, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionId, SessionModeId,
-    SessionNotification, SetSessionModeRequest, SetSessionModelRequest, TextContent,
+    CancelNotification, ContentBlock, ImageContent, InitializeRequest, McpServer, McpServerHttp,
+    ModelId, NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome,
+    SessionId, SessionModeId, SessionNotification, SetSessionModeRequest, SetSessionModelRequest,
+    TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
@@ -70,6 +71,8 @@ pub fn start(
     pending: PendingPermissions,
     db: Arc<Db>,
     agent_cfg: Arc<Mutex<serde_json::Value>>,
+    busy: Arc<AtomicBool>,
+    mcp_url: Option<String>,
 ) -> Option<tauri::async_runtime::JoinHandle<()>> {
     if std::env::var_os("CLAUDECODE").is_some() {
         std::env::remove_var("CLAUDECODE");
@@ -212,14 +215,33 @@ pub fn start(
                     }
                 };
                 let init_json = serde_json::to_value(&init).unwrap_or_default();
+                tracing::info!(
+                    "[{iid_main}] agentCapabilities: {}",
+                    init_json.get("agentCapabilities").cloned().unwrap_or(serde_json::Value::Null)
+                );
                 publish_config(&app_main, &iid_main, &cfg_main, json!({
                     "agent_info": init_json.get("agentInfo"),
                     "auth_methods": init_json.get("authMethods"),
                 }));
 
-                // session/new
+                // session/new — attach agpet's MCP delegate server if the agent
+                // supports HTTP MCP (so it gets the `delegate`/`list_agents` tools).
+                let mut new_req = NewSessionRequest::new(cwd_main.clone());
+                if let Some(url) = &mcp_url {
+                    let http_ok = init_json
+                        .get("agentCapabilities")
+                        .and_then(|c| c.get("mcpCapabilities"))
+                        .and_then(|m| m.get("http"))
+                        .and_then(|h| h.as_bool())
+                        .unwrap_or(false);
+                    if http_ok {
+                        new_req = new_req.mcp_servers(vec![McpServer::Http(McpServerHttp::new("agpet", url.clone()))]);
+                    } else {
+                        tracing::info!("[{iid_main}] agent has no http MCP capability; delegate tool unavailable");
+                    }
+                }
                 let sess = match conn
-                    .send_request(NewSessionRequest::new(cwd_main.clone()))
+                    .send_request(new_req)
                     .block_task().await
                 {
                     Ok(r) => r,
@@ -283,6 +305,7 @@ pub fn start(
                             // Drop any stale cancel signals (e.g. Stop pressed while idle),
                             // then race the turn against the Stop button.
                             while cancel_rx.try_recv().is_ok() {}
+                            busy.store(true, Ordering::SeqCst); // delegate() refuses busy targets
                             let mut prompt_fut = std::pin::pin!(conn.send_request(req).block_task());
                             let result = loop {
                                 tokio::select! {
@@ -293,6 +316,7 @@ pub fn start(
                                     }
                                 }
                             };
+                            busy.store(false, Ordering::SeqCst);
                             match result {
                                 Ok(_) => {
                                     record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
@@ -337,7 +361,10 @@ pub fn start(
                                 let _ = db_main.append_event(&id, "user_message", &json!({"text": text}).to_string()).await;
                             }
                             let req = PromptRequest::new(acp_session.clone(), vec![ContentBlock::Text(TextContent::new(text))]);
-                            match conn.send_request(req).block_task().await {
+                            busy.store(true, Ordering::SeqCst);
+                            let step = conn.send_request(req).block_task().await;
+                            busy.store(false, Ordering::SeqCst);
+                            match step {
                                 Ok(_) => {
                                     let agent_text = record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
                                     emit_state(&app_main, &iid_main, "completed", None);
