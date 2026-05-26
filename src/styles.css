@@ -96,6 +96,31 @@ body {
 .wf-run:hover {
   filter: brightness(1.08);
 }
+.wt-actions {
+  align-self: flex-end;
+  display: flex;
+  gap: 6px;
+}
+.wt-actions button {
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.wt-actions button:hover {
+  filter: brightness(1.08);
+}
+.wt-merge {
+  background: #3fa45b;
+  color: #fff;
+}
+.wt-remove {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
 
 #toast {
   position: fixed;

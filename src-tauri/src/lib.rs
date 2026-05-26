@@ -122,6 +122,17 @@ fn worktree_remove(
     git::worktree_remove(&repo, &path)
 }
 
+/// Merge a worktree's branch into the base instance's current branch.
+#[tauri::command]
+fn worktree_merge(
+    base_instance: String,
+    branch: String,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<String, String> {
+    let repo = state.cwd_of(&base_instance).ok_or_else(|| format!("unknown instance: {base_instance}"))?;
+    git::worktree_merge(&repo, &branch)
+}
+
 /// Is the base instance's working dir a git repo? (Gate the worktree options.)
 #[tauri::command]
 fn is_git_repo(base_instance: String, state: tauri::State<'_, acp::AcpManager>) -> bool {
@@ -220,6 +231,7 @@ pub fn run() {
             worktree_create,
             worktree_list,
             worktree_remove,
+            worktree_merge,
             is_git_repo,
             run_handoff,
             respond_permission,

@@ -136,3 +136,32 @@ pub fn worktree_remove(repo: &Path, path: &str) -> Result<(), String> {
     git(repo, &["worktree", "remove", path])?;
     Ok(())
 }
+
+/// Merge `branch` into the base repo's current branch (only brings in commits
+/// the worktree actually made). On conflict the merge is aborted so the repo
+/// stays clean and the user is told to merge manually.
+pub fn worktree_merge(repo: &Path, branch: &str) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge", "--no-edit", branch])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        let summary = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("merged")
+            .trim()
+            .to_string();
+        Ok(format!("Merged {branch} — {summary}"))
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let _ = git(repo, &["merge", "--abort"]); // clean up if a conflicted merge started
+        Err(if err.is_empty() {
+            format!("merge of {branch} failed — resolve manually")
+        } else {
+            err
+        })
+    }
+}

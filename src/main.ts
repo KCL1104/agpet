@@ -245,10 +245,17 @@ async function buildWorktrees() {
   for (const w of items) {
     const row = document.createElement("div");
     row.className = "wf-row";
-    row.innerHTML = `<div class="wf-name"></div><div class="wf-need"></div><button class="wf-run">Remove</button>`;
+    row.innerHTML =
+      `<div class="wf-name"></div><div class="wf-need"></div>` +
+      `<div class="wt-actions"><button class="wt-merge">Merge</button><button class="wt-remove">Remove</button></div>`;
     row.querySelector(".wf-name")!.textContent = w.branch;
     row.querySelector(".wf-need")!.textContent = w.path;
-    row.querySelector(".wf-run")!.addEventListener("click", () => {
+    row.querySelector(".wt-merge")!.addEventListener("click", () => {
+      invoke<string>("worktree_merge", { baseInstance: base.id, branch: w.branch })
+        .then((msg) => showToast(msg || `Merged ${w.branch}`))
+        .catch((e) => showToast(`Merge failed: ${e}`));
+    });
+    row.querySelector(".wt-remove")!.addEventListener("click", () => {
       invoke("worktree_remove", { baseInstance: base.id, path: w.path })
         .then(() => buildWorktrees())
         .catch((e) => showToast(`Remove failed: ${e}`));
