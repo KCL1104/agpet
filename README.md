@@ -28,6 +28,26 @@ Grab the latest build from the [**Releases**](https://github.com/KCL1104/agpet/r
 
 You still need the agent CLIs you want to use installed and logged in (e.g. `claude`, `codex`, `opencode`, `copilot`, `gemini`). agpet reuses each CLI's own login — it never stores API keys.
 
+## Windows: running agents through WSL
+
+If you keep your agent CLIs inside **WSL** (Windows Subsystem for Linux) rather than installing them natively on Windows, agpet can launch them there. Add `wsl = true` to an agent in your `agents.toml` (found in the app config dir; a default is written on first run):
+
+```toml
+[[agent]]
+id = "claude-wsl"
+name = "Claude (WSL)"
+command = "npx"
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+wsl = true
+# wsl_distro = "Ubuntu"   # optional; omit to use your default distro
+```
+
+With `wsl = true`, agpet runs the command via `wsl.exe … -- bash -lc '<command>'` and automatically translates the working directory and `@`-mention paths from `C:\…` to `/mnt/c/…` so the agent resolves them correctly. Notes:
+
+- The CLI must be on your **login-shell** `PATH` inside WSL (e.g. installed globally, or your `~/.profile`/`~/.bash_profile` loads `nvm`). The login shell must not print to stdout, since that channel carries the ACP protocol.
+- The built-in `delegate` MCP server runs on the Windows host's `127.0.0.1`. Reaching it from WSL relies on WSL2 localhost forwarding (mirrored networking on recent Windows 11); if delegation can't connect, that's the thing to check.
+- `wsl = true` is ignored on macOS/Linux.
+
 ## Build from source
 
 Prerequisites: [Rust](https://www.rust-lang.org/tools/install) (stable), [Node.js](https://nodejs.org) (LTS), and the [Tauri v2 system dependencies](https://v2.tauri.app/start/prerequisites/) for your OS.

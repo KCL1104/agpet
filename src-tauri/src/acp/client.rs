@@ -90,7 +90,11 @@ pub fn start(
     let argv = def.argv();
     let agent_name = def.name.clone();
     let workdir = cwd.to_string_lossy().to_string();
-    tracing::info!("[{instance_id}] starting adapter: {argv:?} (cwd {})", cwd.display());
+    // What the *agent* sees as its cwd: WSL-translated when this agent runs inside
+    // WSL (so `/mnt/c/…`), otherwise the native path. Local git / filesystem ops
+    // keep using the original `cwd`; only paths handed to the agent are translated.
+    let agent_cwd = def.agent_path(&cwd);
+    tracing::info!("[{instance_id}] starting adapter: {argv:?} (cwd {} -> agent {})", cwd.display(), agent_cwd.display());
 
     let current_db_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let turn_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -119,7 +123,7 @@ pub fn start(
         emit_state(&app, &instance_id, "connecting", None);
 
         let status_main = status.clone();
-        let cwd_main = cwd.clone();
+        let cwd_main = agent_cwd.clone();
         let app_notif = app.clone();
         let app_perm = app.clone();
         let app_main = app.clone();

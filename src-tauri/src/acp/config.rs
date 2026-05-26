@@ -24,16 +24,79 @@ pub struct AgentDef {
     /// Pet body colour (hex).
     #[serde(default = "default_color")]
     pub color: String,
+    /// Run this agent's CLI inside WSL (Windows Subsystem for Linux). Use this
+    /// when the agent CLI is installed in your WSL distro rather than native
+    /// Windows. The command runs in a `bash` login shell so your profile's PATH
+    /// (nvm, etc.) applies, and working-directory / `@`-mention paths are
+    /// translated to their `/mnt/<drive>/…` form. Ignored on non-Windows hosts.
+    #[serde(default)]
+    pub wsl: bool,
+    /// Optional WSL distro to use (`wsl -d <distro>`). Defaults to your default
+    /// distro. Only relevant when `wsl = true`.
+    #[serde(default)]
+    pub wsl_distro: Option<String>,
 }
 
 fn default_color() -> String {
     "#e8743b".to_string()
 }
 
+/// Whether this agent should be launched through WSL on the current host.
+/// WSL only exists on Windows, so this is always false elsewhere.
+fn use_wsl(def: &AgentDef) -> bool {
+    cfg!(windows) && def.wsl
+}
+
+/// Single-quote a string for a POSIX shell command line, escaping embedded
+/// single quotes (`'` -> `'\''`).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Translate a Windows path (`C:\Users\me\proj`) into its WSL mount equivalent
+/// (`/mnt/c/Users/me/proj`) so an agent running inside WSL can resolve it.
+/// Paths that are already POSIX-style, or UNC paths, are returned with forward
+/// slashes and otherwise unchanged.
+pub fn win_to_wsl_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let bytes = s.as_bytes();
+    // Drive-letter absolute path: "C:/..." (or bare "C:").
+    if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = s[2..].strip_prefix('/').unwrap_or(&s[2..]);
+        return format!("/mnt/{drive}/{rest}");
+    }
+    s
+}
+
 impl AgentDef {
-    /// Full argv for [`agent_client_protocol::AcpAgent::from_args`], wrapping in
-    /// `cmd /c` on Windows so `.cmd` shims resolve and run.
+    /// Full argv for [`agent_client_protocol::AcpAgent::from_args`].
+    ///
+    /// - With `wsl = true` on Windows: `wsl.exe [-d <distro>] -- bash -lc '<cmd>'`
+    ///   so the CLI installed inside WSL runs with the user's login-shell PATH.
+    /// - On Windows otherwise: wrapped in `cmd /c` so `.cmd` shims (npx,
+    ///   npm-installed bins) resolve and run.
+    /// - Elsewhere: the command and args verbatim.
     pub fn argv(&self) -> Vec<String> {
+        if use_wsl(self) {
+            // Build a single POSIX command line for `bash -lc`.
+            let mut cmdline = sh_quote(&self.command);
+            for a in &self.args {
+                cmdline.push(' ');
+                cmdline.push_str(&sh_quote(a));
+            }
+            let mut v = Vec::with_capacity(6);
+            v.push("wsl.exe".to_string());
+            if let Some(distro) = self.wsl_distro.as_deref().filter(|d| !d.is_empty()) {
+                v.push("-d".to_string());
+                v.push(distro.to_string());
+            }
+            v.push("--".to_string());
+            v.push("bash".to_string());
+            v.push("-lc".to_string());
+            v.push(cmdline);
+            return v;
+        }
         let mut v = Vec::with_capacity(self.args.len() + 3);
         if cfg!(windows) {
             v.push("cmd".to_string());
@@ -42,6 +105,18 @@ impl AgentDef {
         v.push(self.command.clone());
         v.extend(self.args.iter().cloned());
         v
+    }
+
+    /// Translate `cwd` to the form the agent should receive: the WSL mount path
+    /// when this agent runs inside WSL, otherwise the path unchanged. Used for
+    /// the session cwd and `@`-mention file URIs (never for local filesystem or
+    /// git operations, which must keep the native Windows path).
+    pub fn agent_path(&self, cwd: &std::path::Path) -> std::path::PathBuf {
+        if use_wsl(self) {
+            std::path::PathBuf::from(win_to_wsl_path(cwd))
+        } else {
+            cwd.to_path_buf()
+        }
     }
 }
 
@@ -92,6 +167,8 @@ fn default_agents() -> Vec<AgentDef> {
             command: "npx".into(),
             args: vec!["-y".into(), "@agentclientprotocol/claude-agent-acp".into()],
             color: "#da7756".into(),
+            wsl: false,
+            wsl_distro: None,
         },
         AgentDef {
             id: "codex".into(),
@@ -99,6 +176,8 @@ fn default_agents() -> Vec<AgentDef> {
             command: "npx".into(),
             args: vec!["-y".into(), "@zed-industries/codex-acp".into()],
             color: "#10a37f".into(),
+            wsl: false,
+            wsl_distro: None,
         },
         AgentDef {
             id: "opencode".into(),
@@ -106,6 +185,8 @@ fn default_agents() -> Vec<AgentDef> {
             command: "opencode".into(),
             args: vec!["acp".into()],
             color: "#6e7681".into(),
+            wsl: false,
+            wsl_distro: None,
         },
         AgentDef {
             id: "copilot".into(),
@@ -113,6 +194,8 @@ fn default_agents() -> Vec<AgentDef> {
             command: "copilot".into(),
             args: vec!["--acp".into()],
             color: "#8b5cf6".into(),
+            wsl: false,
+            wsl_distro: None,
         },
         AgentDef {
             id: "gemini".into(),
@@ -120,6 +203,8 @@ fn default_agents() -> Vec<AgentDef> {
             command: "gemini".into(),
             args: vec!["--experimental-acp".into()],
             color: "#4e8cf5".into(),
+            wsl: false,
+            wsl_distro: None,
         },
     ]
 }
@@ -127,6 +212,18 @@ fn default_agents() -> Vec<AgentDef> {
 const DEFAULT_AGENTS_TOML: &str = r##"# agpet agents — one pet per agent. Edit freely; restart the app to apply.
 # `command` + `args` are run via `cmd /c` on Windows so npx/.cmd shims work.
 # Each agent uses its own CLI login (run e.g. `claude /login`, Codex/OpenCode auth).
+#
+# WSL (Windows only): if an agent's CLI lives in your WSL distro rather than
+# native Windows, add `wsl = true` (and optionally `wsl_distro = "Ubuntu"`). The
+# command then runs in a WSL `bash` login shell and working-directory paths are
+# translated to /mnt/<drive>/… automatically. Example:
+#   [[agent]]
+#   id = "claude-wsl"
+#   name = "Claude (WSL)"
+#   command = "npx"
+#   args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+#   wsl = true
+#   # wsl_distro = "Ubuntu"
 
 [[agent]]
 id = "claude"
