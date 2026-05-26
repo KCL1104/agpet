@@ -87,6 +87,22 @@ fn set_model(instance: String, model: String, state: tauri::State<'_, acp::AcpMa
     state.set_model(&instance, model)
 }
 
+/// Available workflows (id / name / required agent types).
+#[tauri::command]
+fn list_workflows(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::Workflow> {
+    state.list_workflows()
+}
+
+/// Run a workflow with the given user input across running pets.
+#[tauri::command]
+fn run_workflow(
+    workflow_id: String,
+    input: String,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<(), String> {
+    state.run_workflow(&workflow_id, input)
+}
+
 /// Recent sessions for the instance's agent type.
 #[tauri::command]
 async fn list_sessions(
@@ -126,6 +142,8 @@ pub fn run() {
             get_agent_config,
             set_mode,
             set_model,
+            list_workflows,
+            run_workflow,
             list_sessions,
             update_pet_rects,
             set_panel_open

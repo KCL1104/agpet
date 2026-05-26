@@ -35,6 +35,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let manager = app.state::<AcpManager>();
 
     let launcher = MenuItem::with_id(app, "launcher", "Open Launcher…", true, None::<&str>)?;
+    let workflow = MenuItem::with_id(app, "workflow", "Run Workflow…", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let close_items: Vec<MenuItem<R>> = manager
         .list_instances()
@@ -46,7 +47,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit agpet", true, None::<&str>)?;
 
-    let mut refs: Vec<&dyn IsMenuItem<R>> = vec![&launcher, &sep1];
+    let mut refs: Vec<&dyn IsMenuItem<R>> = vec![&launcher, &workflow, &sep1];
     for it in &close_items {
         refs.push(it as &dyn IsMenuItem<R>);
     }
@@ -72,6 +73,10 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     }
     if id == "launcher" {
         let _ = app.emit("open-launcher", ());
+        return;
+    }
+    if id == "workflow" {
+        let _ = app.emit("open-workflows", ());
         return;
     }
     if let Some(instance_id) = id.strip_prefix("close:") {

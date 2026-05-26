@@ -90,11 +90,26 @@ const headerEl = document.querySelector(".chat-header") as HTMLDivElement;
 const launcherPanel = document.getElementById("launcher-panel") as HTMLDivElement;
 const launcherClose = document.getElementById("launcher-close") as HTMLButtonElement;
 const launcherList = document.getElementById("launcher-list") as HTMLDivElement;
+const workflowPanel = document.getElementById("workflow-panel") as HTMLDivElement;
+const workflowClose = document.getElementById("workflow-close") as HTMLButtonElement;
+const workflowList = document.getElementById("workflow-list") as HTMLDivElement;
+const toastEl = document.getElementById("toast") as HTMLDivElement;
 
-// The window is interactive whenever the chat OR launcher panel is open.
+// The window is interactive whenever the chat / launcher / workflow panel is open.
 function updatePanelOpen() {
-  const open = !panel.classList.contains("hidden") || !launcherPanel.classList.contains("hidden");
+  const open =
+    !panel.classList.contains("hidden") ||
+    !launcherPanel.classList.contains("hidden") ||
+    !workflowPanel.classList.contains("hidden");
   invoke("set_panel_open", { open }).catch(() => {});
+}
+
+let toastTimer = 0;
+function showToast(msg: string) {
+  toastEl.textContent = msg;
+  toastEl.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toastEl.classList.add("hidden"), 3500);
 }
 
 interface TypeInfo { type_id: string; name: string; color: string; }
@@ -147,6 +162,70 @@ listen("open-launcher", () => {
   buildLauncher();
   launcherPanel.classList.remove("hidden");
   updatePanelOpen();
+});
+
+// --- Workflows (orchestration) -------------------------------------------
+
+interface WorkflowInfo { id: string; name: string; required_types: string[]; }
+
+async function buildWorkflows() {
+  let wfs: WorkflowInfo[] = [];
+  try {
+    wfs = await invoke<WorkflowInfo[]>("list_workflows");
+  } catch (e) {
+    console.error("list_workflows failed", e);
+  }
+  workflowList.innerHTML = "";
+  for (const wf of wfs) {
+    const row = document.createElement("div");
+    row.className = "wf-row";
+    row.innerHTML =
+      `<div class="wf-name"></div><div class="wf-need"></div>` +
+      `<textarea placeholder="What should they work on?"></textarea>` +
+      `<button class="wf-run">Run</button>`;
+    row.querySelector(".wf-name")!.textContent = wf.name;
+    row.querySelector(".wf-need")!.textContent = "Needs running: " + wf.required_types.join(" + ");
+    const ta = row.querySelector("textarea") as HTMLTextAreaElement;
+    row.querySelector(".wf-run")!.addEventListener("click", () => {
+      const input = ta.value.trim();
+      if (!input) { ta.focus(); return; }
+      invoke("run_workflow", { workflowId: wf.id, input }).catch((e) => showToast(`Workflow failed: ${e}`));
+      hideWorkflows();
+      showToast(`Running “${wf.name}”…`);
+    });
+    workflowList.appendChild(row);
+  }
+}
+function hideWorkflows() {
+  workflowPanel.classList.add("hidden");
+  updatePanelOpen();
+}
+workflowClose.addEventListener("click", hideWorkflows);
+listen("open-workflows", () => {
+  buildWorkflows();
+  workflowPanel.classList.remove("hidden");
+  updatePanelOpen();
+});
+
+listen<any>("workflow-step", (e) => {
+  if (e.payload?.type) showToast(`→ ${e.payload.type} (${e.payload.step})`);
+});
+listen<any>("workflow-done", () => showToast("✓ Workflow complete"));
+listen<any>("workflow-error", (e) => showToast(`⚠ ${e.payload?.message ?? "workflow error"}`));
+
+// 📦 handoff animation: a package travels from one pet to the next.
+interface Handoff { fromX: number; toX: number; y: number; start: number; }
+const handoffs: Handoff[] = [];
+listen<{ from_instance: string | null; to_instance: string }>("workflow-handoff", (e) => {
+  const to = petById.get(e.payload.to_instance);
+  const from = e.payload.from_instance ? petById.get(e.payload.from_instance) : undefined;
+  if (!to || !from) return; // first step has no "from": the pet just starts working
+  handoffs.push({
+    fromX: from.x + PET_W / 2,
+    toX: to.x + PET_W / 2,
+    y: baselineY,
+    start: performance.now(),
+  });
 });
 
 // Theme the panel to the selected agent's brand colour.
@@ -811,8 +890,27 @@ function draw(now: number) {
   const w = window.innerWidth;
   ctx.clearRect(0, 0, w, window.innerHeight);
   pets.forEach((pet, i) => drawPet(pet, now, dt, w, i, pets.length));
+  drawHandoffs(now);
   reportRects(now);
   requestAnimationFrame(draw);
+}
+
+const HANDOFF_MS = 1100;
+function drawHandoffs(now: number) {
+  for (let i = handoffs.length - 1; i >= 0; i--) {
+    const h = handoffs[i];
+    const p = (now - h.start) / HANDOFF_MS;
+    if (p >= 1) {
+      handoffs.splice(i, 1);
+      continue;
+    }
+    const x = h.fromX + (h.toX - h.fromX) * p;
+    const arc = Math.sin(p * Math.PI) * 46; // hop up and over
+    ctx.font = "24px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("📦", x, h.y - 8 - arc);
+  }
 }
 
 canvas.addEventListener("click", (e) => {

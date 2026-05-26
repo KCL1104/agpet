@@ -303,6 +303,31 @@ pub fn start(
                                 .send_request(SetSessionModelRequest::new(acp_session.clone(), ModelId::new(model_id)))
                                 .block_task().await;
                         }
+                        AcpCommand::RunStep { text, reply } => {
+                            if let Ok(mut t) = turn_main.lock() { t.clear(); }
+                            if let Some(id) = cur_id(&cur_id_main) {
+                                let _ = db_main.set_initial_prompt(&id, &text).await;
+                                let _ = db_main.append_event(&id, "user_message", &json!({"text": text}).to_string()).await;
+                            }
+                            let req = PromptRequest::new(acp_session.clone(), vec![ContentBlock::Text(TextContent::new(text))]);
+                            match conn.send_request(req).block_task().await {
+                                Ok(_) => {
+                                    let agent_text = turn_main.lock().map(|t| t.clone()).unwrap_or_default();
+                                    if !agent_text.is_empty() {
+                                        if let Some(id) = cur_id(&cur_id_main) {
+                                            let _ = db_main.append_event(&id, "agent_message", &json!({"text": agent_text}).to_string()).await;
+                                        }
+                                    }
+                                    emit_state(&app_main, &iid_main, "completed", None);
+                                    let _ = reply.send(Ok(agent_text));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[{iid_main}] workflow step failed: {e}");
+                                    emit_state(&app_main, &iid_main, "error", Some("step failed".into()));
+                                    let _ = reply.send(Err(e.to_string()));
+                                }
+                            }
+                        }
                         AcpCommand::Resume(prev_id) => {
                             if let Some(id) = cur_id(&cur_id_main) {
                                 summarize_and_finish(&conn, &acp_session, &db_main, &id, &turn_main, &app_main, &iid_main).await;

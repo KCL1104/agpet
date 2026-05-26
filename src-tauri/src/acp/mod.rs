@@ -8,6 +8,9 @@
 mod client;
 pub mod config;
 pub mod logging;
+mod workflow;
+
+pub use workflow::Workflow;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,6 +32,11 @@ pub enum AcpCommand {
     Resume(String),
     SetMode(String),
     SetModel(String),
+    /// Workflow step: send a prompt and return the agent's full reply text.
+    RunStep {
+        text: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 pub type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
@@ -76,7 +84,7 @@ struct Instance {
 }
 
 pub struct AcpManager {
-    instances: Mutex<Vec<Instance>>,
+    instances: Arc<Mutex<Vec<Instance>>>,
     next_n: Mutex<HashMap<String, usize>>,
     defs: Vec<AgentDef>,
     db: Arc<Db>,
@@ -88,7 +96,7 @@ pub struct AcpManager {
 impl AcpManager {
     pub fn new(db: Arc<Db>, config: &AgentsConfig, app: AppHandle) -> Self {
         Self {
-            instances: Mutex::new(Vec::new()),
+            instances: Arc::new(Mutex::new(Vec::new())),
             next_n: Mutex::new(HashMap::new()),
             defs: config.agents.clone(),
             db,
@@ -317,5 +325,19 @@ impl AcpManager {
 
     pub fn db_handle(&self) -> Arc<Db> {
         self.db.clone()
+    }
+
+    pub fn list_workflows(&self) -> Vec<Workflow> {
+        workflow::builtins()
+    }
+
+    /// Start a workflow run (spawns a router task that drives the steps).
+    pub fn run_workflow(&self, workflow_id: &str, user_input: String) -> Result<(), String> {
+        let wf = workflow::builtins()
+            .into_iter()
+            .find(|w| w.id == workflow_id)
+            .ok_or_else(|| format!("unknown workflow: {workflow_id}"))?;
+        workflow::run(self.app.clone(), self.instances.clone(), wf, user_input);
+        Ok(())
     }
 }

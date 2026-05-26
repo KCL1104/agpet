@@ -17,7 +17,8 @@ body {
 
 /* ===== Launcher panel =================================================== */
 
-#launcher-panel {
+#launcher-panel,
+#workflow-panel {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -36,11 +37,80 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 13.5px;
 }
-#launcher-panel.hidden {
+#launcher-panel.hidden,
+#workflow-panel.hidden {
   display: none;
 }
-#launcher-panel:not(.hidden) {
+#launcher-panel:not(.hidden),
+#workflow-panel:not(.hidden) {
   animation: panel-in 0.18s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+#workflow-list {
+  padding: 10px 12px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wf-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-name {
+  font-weight: 650;
+}
+.wf-need {
+  font-size: 11px;
+  color: #969ba6;
+}
+.wf-row textarea {
+  resize: none;
+  min-height: 46px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.28);
+  color: #ececee;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.wf-run {
+  align-self: flex-end;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 16px;
+  background: #f4793b;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.wf-run:hover {
+  filter: brightness(1.08);
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 130px;
+  transform: translateX(-50%);
+  max-width: 70vw;
+  background: rgba(28, 30, 34, 0.96);
+  color: #ececee;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 9px 15px;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+  z-index: 20;
+}
+#toast.hidden {
+  display: none;
 }
 .launcher-header {
   display: flex;

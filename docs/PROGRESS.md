@@ -160,6 +160,17 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **每實例自己的 cwd**：`launch_instance(kind, cwd?)`；`Instance` 存 `cwd`，`client::start` + session/new + DB workdir + retry 都用它。**同型可在不同資料夾各開一隻、同時跑**。
 - **驗證**（使用者實測）：開機空桌面 → tray Open Launcher → 選資料夾 → 寵物在該目錄工作；可多開不同資料夾。
 
-## 之後：Milestone 3 — Slice 2 + 其他
+## Milestone 3 — Slice 2（Agent Router + workflow + 交接動畫）✅ 完成並驗證
 
-Agent Router + workflow（plan-then-execute Claude→Codex）、交接動畫、可編輯 YAML workflow（Slice 2）；跨機器（M4）；`sysinfo`/WSL 外部 session 偵測；Antigravity CLI、adapter 套件更名 — 留待後續。
+- **擷取每步輸出**：`AcpCommand::RunStep{text, reply: oneshot}`（`acp/client.rs`）—— 送 `session/prompt`、`block_task`、把該回合 `turn_text` 全文回傳。
+- **編排引擎**（`acp/workflow.rs`）：`Workflow`/`WorkflowStep` 模型 + 內建 **plan-then-execute**（Claude 規劃→Codex 執行→Claude 審查）。`run()` spawn task：依型別找**現有執行中實例**（`Arc<Mutex<Vec<Instance>>>`）、`{user_input}`/`{{var}}` 代入、串接每步輸出、emit `workflow-handoff/step/done/error`。同型別重用同一實例（步驟1、3同一隻 Claude → session 連續）。
+- **commands/tray**：`list_workflows`/`run_workflow`；tray「Run Workflow…」→ emit `open-workflows`。
+- **前端**：workflow 面板（選 workflow + 輸入 + Run）；listen `workflow-handoff` → canvas 畫 **📦 從一隻寵物飛到另一隻**；step/done/error → toast。
+- **驗證**（使用者實測）：開 Claude + Codex（同夾）→ Run plan-then-execute → Claude 規劃 → 📦→ Codex 執行 → 📦→ Claude 審查；**交接動畫 + 輸出串接正常**。
+- 缺對應型別寵物時提示「Launch a {type} first」。
+
+## 之後（待續）
+
+- M3 Slice 2b：可編輯 YAML workflow（從 config 載入多個）、步驟間同檔衝突鎖。
+- M4：跨機器團隊（feature B，spec 標延後/可能不做）。
+- 其他：`sysinfo`/WSL 外部 session 偵測；Antigravity CLI 接入；adapter 套件更名（claude-code-acp→claude-agent-acp）；多寵物排版微調。
