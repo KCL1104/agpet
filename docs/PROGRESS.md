@@ -133,10 +133,25 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - MVP 事件記錄聚焦 user/agent/tool + files；thinking chunk、project-relative 路徑欄位之後再加。
 - 摘要/Resume 各耗一次訂閱額度。
 
-## 下一步：Milestone 3（多 agent 編排，feature A）
+## Milestone 3 — Slice 1（多 agent 存在 + 各自聊天）✅ 完成並驗證
 
-agents.toml 設定、同時 spawn 多個 adapter、多隻寵物、Agent Router + workflow（plan-then-execute：Claude→Codex）、交接動畫、可編輯 YAML workflow。詳見 [`acp-desktop-pet-spec.md`](./acp-desktop-pet-spec.md) Milestone 3。
+- `agents.toml`（`AppData\Roaming\com.agpet.pet\agents.toml`，toml crate，可編輯）宣告 agents；預設 claude/codex/opencode；Windows 用 `cmd /c` 包裝。
+- `AcpManager` 持 `Vec<AgentHandle>`，每個 agent 一條連線/狀態/指令通道/pending；`client::start` 帶 `agent_id`，事件（pet-state/chat-event/permission-request）+ DB 全部帶 agent_id；指令依 agent 分派；`list_agents`、`list_sessions(agent_id)`。
+- `overlay.rs` 多 pet 矩形 hit-test。
+- 前端：`list_agents` → 每 agent 一隻寵物（各自顏色/狀態），點選取開該 agent 面板，per-agent transcript 容器。
+- **驗證**：三隻寵物各自獨立 spawn。Claude ✅ 連上可聊；Codex 🔑 auth_required（codex-acp v0.15.0 跑起來但未登入）；OpenCode 💤 exited（`opencode` 不在 PATH）。互不影響 → 隔離正確。
 
-## 此階段刻意未做（之後里程碑）
+## Agent UX 強化批次 ✅ 完成並驗證
 
-多 agent 編排（M3）、跨機器（M4）、`sysinfo` 外部 session 偵測、WSL 偵測 — 留待後續。
+- **型別 vs 實例**：`agents.toml` = 型別範本；runtime 動態 **instance**（一隻寵物=一連線=一 session），**同型可多開**（Claude Code 2…）。事件/指令以 `instance_id` 為鍵；DB 用 `type_id`（歷史按型別匯總）。`AcpManager` 改實例註冊表 + `launch`/`close`/`retry`。
+- **系統托盤**（`tray.rs`，tauri `tray-icon` feature）：`New ▸`（各型多開）/ 執行中實例 `Close`（停 adapter）/ `Quit`；選單動態重建。
+- **Auth Retry**：client 擷取 `authMethods` 並 emit `agent-config`；面板對 auth_required/error/exited 顯示登入指示 + **Retry** 鈕（`retry_agent`，免重啟）。解決 Codex「沒地方修登入」。
+- **品牌主題**：選取實例時面板 `--accent` 換成該 agent 色（Claude `#da7756` / Codex `#10a37f` / OpenCode `#6e7681`）。
+- **模型/模式設定**：⚙ popover 下拉（來自握手 models/modes）；`set_model`（需 `unstable_session_model` feature，`session/set_model`）/`set_mode`（`session/set_mode`）。
+- **字體/密度 + 拖曳/縮放**：⚙ 字體(S/M/L)、密度(Cozy/Compact)；header 拖曳、左上角縮放；全部存 localStorage。
+- **驗證**：3 隻寵物各自起；Claude 連上、Codex 顯示 Retry 列、OpenCode offline；tray 多開「Claude Code 2」、Close、Quit、主題、⚙ 設定、拖曳/縮放皆 OK（使用者實測）。
+- 提醒：Codex 需登入（ChatGPT/Codex CLI 或 OPENAI_API_KEY）、OpenCode 需 `opencode` 在 PATH —— 屬使用者環境，非程式問題；面板 Retry 可在登入後免重啟重連。
+
+## 之後：Milestone 3 — Slice 2 + 其他
+
+Agent Router + workflow（plan-then-execute Claude→Codex）、交接動畫、可編輯 YAML workflow（Slice 2）；跨機器（M4）；`sysinfo`/WSL 外部 session 偵測 — 留待後續。

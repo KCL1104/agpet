@@ -1,6 +1,7 @@
 mod acp;
 mod db;
 mod overlay;
+mod tray;
 
 use std::sync::atomic::Ordering;
 
@@ -8,53 +9,87 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize};
 
 use overlay::{OverlayState, PetRectInput};
 
-/// Agents to render as pets (id / name / colour).
+/// Running instances (pets) to render.
 #[tauri::command]
-fn list_agents(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::AgentInfo> {
-    state.list_agents()
+fn list_instances(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::InstanceInfo> {
+    state.list_instances()
 }
 
-/// Send a user prompt to a specific agent's live session.
+/// Agent types (for a "New instance" menu).
 #[tauri::command]
-fn send_prompt(agent: String, text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.send_prompt(&agent, text)
+fn list_types(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::TypeInfo> {
+    state.list_types()
 }
 
-/// Resolve a pending permission request for an agent.
+/// Launch a new instance of an agent type.
 #[tauri::command]
-fn respond_permission(agent: String, id: String, choice: String, state: tauri::State<'_, acp::AcpManager>) {
-    state.respond_permission(&agent, id, choice);
+fn launch_instance(kind: String, state: tauri::State<'_, acp::AcpManager>) -> Result<String, String> {
+    state.launch(&kind)
 }
 
-/// End + summarize an agent's current session and open a fresh one.
+/// Close (stop) an instance.
 #[tauri::command]
-fn new_session(agent: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.new_session(&agent)
+fn close_instance(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.close(&instance)
 }
 
-/// Open a fresh session for an agent, seeded with a past session's summary.
+/// Reconnect a stopped/errored instance.
 #[tauri::command]
-fn resume_session(agent: String, id: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.resume_session(&agent, id)
+fn retry_agent(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.retry(&instance)
 }
 
-/// List recent persisted sessions for one agent.
+#[tauri::command]
+fn send_prompt(instance: String, text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.send_prompt(&instance, text)
+}
+
+#[tauri::command]
+fn respond_permission(instance: String, id: String, choice: String, state: tauri::State<'_, acp::AcpManager>) {
+    state.respond_permission(&instance, id, choice);
+}
+
+#[tauri::command]
+fn new_session(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.new_session(&instance)
+}
+
+#[tauri::command]
+fn resume_session(instance: String, id: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.resume_session(&instance, id)
+}
+
+#[tauri::command]
+fn get_agent_config(instance: String, state: tauri::State<'_, acp::AcpManager>) -> serde_json::Value {
+    state.agent_config(&instance)
+}
+
+#[tauri::command]
+fn set_mode(instance: String, mode: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.set_mode(&instance, mode)
+}
+
+#[tauri::command]
+fn set_model(instance: String, model: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.set_model(&instance, model)
+}
+
+/// Recent sessions for the instance's agent type.
 #[tauri::command]
 async fn list_sessions(
-    agent: String,
+    instance: String,
     state: tauri::State<'_, acp::AcpManager>,
 ) -> Result<Vec<db::SessionRow>, String> {
+    let type_id = state.type_of(&instance).ok_or_else(|| "unknown instance".to_string())?;
     let db = state.db_handle();
-    db.list_sessions(&agent, 50).await.map_err(|e| e.to_string())
+    db.list_sessions(&type_id, 50).await.map_err(|e| e.to_string())
 }
 
-/// Frontend reports every pet's bounding box (CSS px) for click-through hit-testing.
 #[tauri::command]
 fn update_pet_rects(rects: Vec<PetRectInput>, state: tauri::State<'_, OverlayState>) {
     state.set_rects(rects);
 }
 
-/// Frontend tells the backend whether the chat panel is open.
 #[tauri::command]
 fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
     state.panel_open.store(open, Ordering::Relaxed);
@@ -65,11 +100,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            list_agents,
+            list_instances,
+            list_types,
+            launch_instance,
+            close_instance,
+            retry_agent,
             send_prompt,
             respond_permission,
             new_session,
             resume_session,
+            get_agent_config,
+            set_mode,
+            set_model,
             list_sessions,
             update_pet_rects,
             set_panel_open
@@ -79,7 +121,6 @@ pub fn run() {
                 .get_webview_window("main")
                 .expect("main window should exist");
 
-            // Stretch the transparent window to cover the primary monitor.
             if let Ok(Some(monitor)) = window.primary_monitor() {
                 let pos = monitor.position();
                 let size = monitor.size();
@@ -87,22 +128,25 @@ pub fn run() {
                 let _ = window.set_size(PhysicalSize::new(size.width, size.height));
             }
 
-            // Start fully click-through; the overlay loop toggles per pet.
             let _ = window.set_ignore_cursor_events(true);
             app.manage(OverlayState::new());
             overlay::spawn_clickthrough_loop(app.handle().clone());
 
-            // Open the session DB, load agents, and spawn one ACP client per agent.
             acp::logging::init();
             let setup: anyhow::Result<()> = (|| {
                 let db_path = app.path().app_data_dir()?.join("agpet.db");
                 let database = tauri::async_runtime::block_on(db::Db::init(&db_path))?;
                 tracing::info!("session DB: {}", db_path.display());
                 let config = acp::AgentsConfig::load(app.handle())?;
-                tracing::info!("loaded {} agent(s)", config.agents.len());
-                let manager = acp::AcpManager::new(std::sync::Arc::new(database), &config);
-                manager.start_all(app.handle().clone());
+                tracing::info!("loaded {} agent type(s)", config.agents.len());
+                let manager = acp::AcpManager::new(
+                    std::sync::Arc::new(database),
+                    &config,
+                    app.handle().clone(),
+                );
+                manager.launch_defaults();
                 app.manage(manager);
+                tray::build_tray(app.handle())?;
                 Ok(())
             })();
             if let Err(e) = setup {

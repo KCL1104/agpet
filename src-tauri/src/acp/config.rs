@@ -91,7 +91,7 @@ fn default_agents() -> Vec<AgentDef> {
             name: "Claude Code".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@zed-industries/claude-code-acp".into()],
-            color: "#e8743b".into(),
+            color: "#da7756".into(),
         },
         AgentDef {
             id: "codex".into(),
@@ -105,7 +105,7 @@ fn default_agents() -> Vec<AgentDef> {
             name: "OpenCode".into(),
             command: "opencode".into(),
             args: vec!["acp".into()],
-            color: "#7c5cff".into(),
+            color: "#6e7681".into(),
         },
     ]
 }
@@ -119,7 +119,7 @@ id = "claude"
 name = "Claude Code"
 command = "npx"
 args = ["-y", "@zed-industries/claude-code-acp"]
-color = "#e8743b"
+color = "#da7756"
 
 [[agent]]
 id = "codex"
@@ -133,5 +133,5 @@ id = "opencode"
 name = "OpenCode"
 command = "opencode"
 args = ["acp"]
-color = "#7c5cff"
+color = "#6e7681"
 "##;

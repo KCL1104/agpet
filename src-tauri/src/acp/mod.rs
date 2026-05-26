@@ -1,8 +1,9 @@
-//! ACP client core (Milestone 1–3).
+//! ACP client core (Milestone 1–3 + UX batch).
 //!
-//! Manages one ACP connection per declared agent (a pet). Each agent spawns its
-//! own adapter, has its own status / command channel / pending-permission map,
-//! and persists its own sessions (the DB is shared, keyed by agent_id).
+//! Manages **agent types** (from `agents.toml`) and dynamically-launched
+//! **instances** (pets). The same type can have multiple live instances. Each
+//! instance has its own connection / status / command channel / pending-perm
+//! map; the DB is shared and keyed by the type id (so history groups per type).
 
 mod client;
 pub mod config;
@@ -13,28 +14,29 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::AppHandle;
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
 pub use config::{AgentDef, AgentsConfig};
 
 use crate::db::Db;
 
-/// Commands sent into a live ACP connection from Tauri commands.
+/// Commands sent into a live instance's connection.
 pub enum AcpCommand {
     Prompt(String),
     NewSession,
     Resume(String),
+    SetMode(String),
+    SetModel(String),
 }
 
-/// Pending `session/request_permission` requests awaiting a user decision.
 pub type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 
-/// Current state of one agent's connection.
+/// State of one instance's connection.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AcpStatus {
-    Idle,
     Connecting,
     Connected { session_id: String },
     AuthRequired { message: String },
@@ -42,112 +44,244 @@ pub enum AcpStatus {
     Exited { message: String },
 }
 
-/// Minimal agent info for the frontend (to render pets).
+/// An agent type (template) for the tray's "New" menu.
 #[derive(Debug, Clone, Serialize)]
-pub struct AgentInfo {
-    pub id: String,
+pub struct TypeInfo {
+    pub type_id: String,
     pub name: String,
     pub color: String,
 }
 
-/// Per-agent runtime handle.
-struct AgentHandle {
-    def: AgentDef,
-    status: Arc<Mutex<AcpStatus>>,
-    cmd_tx: mpsc::UnboundedSender<AcpCommand>,
-    cmd_rx: Mutex<Option<mpsc::UnboundedReceiver<AcpCommand>>>,
-    pending: PendingPermissions,
+/// A running instance, for the frontend to render a pet.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstanceInfo {
+    pub instance_id: String,
+    pub type_id: String,
+    pub name: String,
+    pub color: String,
 }
 
-/// Tauri-managed handle to all agents.
+struct Instance {
+    instance_id: String,
+    type_id: String,
+    name: String,
+    color: String,
+    status: Arc<Mutex<AcpStatus>>,
+    cmd_tx: Option<mpsc::UnboundedSender<AcpCommand>>,
+    pending: PendingPermissions,
+    /// Agent config (authMethods / models / modes) filled in by the client.
+    config: Arc<Mutex<serde_json::Value>>,
+}
+
 pub struct AcpManager {
-    agents: Vec<AgentHandle>,
+    instances: Mutex<Vec<Instance>>,
+    next_n: Mutex<HashMap<String, usize>>,
+    defs: Vec<AgentDef>,
     db: Arc<Db>,
+    app: AppHandle,
     cwd: PathBuf,
     log_dir: PathBuf,
 }
 
 impl AcpManager {
-    pub fn new(db: Arc<Db>, config: &AgentsConfig) -> Self {
-        let agents = config
-            .agents
-            .iter()
-            .map(|def| {
-                let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-                AgentHandle {
-                    def: def.clone(),
-                    status: Arc::new(Mutex::new(AcpStatus::Idle)),
-                    cmd_tx,
-                    cmd_rx: Mutex::new(Some(cmd_rx)),
-                    pending: Arc::new(Mutex::new(HashMap::new())),
-                }
-            })
-            .collect();
+    pub fn new(db: Arc<Db>, config: &AgentsConfig, app: AppHandle) -> Self {
         Self {
-            agents,
+            instances: Mutex::new(Vec::new()),
+            next_n: Mutex::new(HashMap::new()),
+            defs: config.agents.clone(),
             db,
+            app,
             cwd: config.cwd.clone(),
             log_dir: config.log_dir.clone(),
         }
     }
 
-    /// Spawn every agent's adapter + handshake + command loop. Call once.
-    pub fn start_all(&self, app: AppHandle) {
-        for h in &self.agents {
-            let Some(cmd_rx) = h.cmd_rx.lock().ok().and_then(|mut g| g.take()) else {
-                continue;
-            };
-            let log_path = self.log_dir.join(format!("acp-messages-{}.jsonl", h.def.id));
-            client::start(
-                app.clone(),
-                h.def.clone(),
-                self.cwd.clone(),
-                log_path,
-                h.status.clone(),
-                cmd_rx,
-                h.pending.clone(),
-                self.db.clone(),
-            );
+    /// Launch one instance per declared type (initial pets).
+    pub fn launch_defaults(&self) {
+        let ids: Vec<String> = self.defs.iter().map(|d| d.id.clone()).collect();
+        for id in ids {
+            let _ = self.launch(&id);
         }
     }
 
-    pub fn list_agents(&self) -> Vec<AgentInfo> {
-        self.agents
+    /// Launch a new instance of `type_id`. Returns its instance id.
+    pub fn launch(&self, type_id: &str) -> Result<String, String> {
+        let def = self
+            .defs
             .iter()
-            .map(|h| AgentInfo {
-                id: h.def.id.clone(),
-                name: h.def.name.clone(),
-                color: h.def.color.clone(),
+            .find(|d| d.id == type_id)
+            .ok_or_else(|| format!("unknown agent type: {type_id}"))?
+            .clone();
+
+        let n = {
+            let mut c = self.next_n.lock().unwrap();
+            let e = c.entry(type_id.to_string()).or_insert(0);
+            *e += 1;
+            *e
+        };
+        let instance_id = format!("{type_id}-{n}");
+        let name = if n == 1 { def.name.clone() } else { format!("{} {}", def.name, n) };
+        let color = def.color.clone();
+
+        let status = Arc::new(Mutex::new(AcpStatus::Connecting));
+        let pending: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
+        let cfg = Arc::new(Mutex::new(serde_json::Value::Null));
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+        self.instances.lock().unwrap().push(Instance {
+            instance_id: instance_id.clone(),
+            type_id: type_id.to_string(),
+            name: name.clone(),
+            color: color.clone(),
+            status: status.clone(),
+            cmd_tx: Some(cmd_tx),
+            pending: pending.clone(),
+            config: cfg.clone(),
+        });
+
+        let log_path = self.log_dir.join(format!("acp-messages-{instance_id}.jsonl"));
+        client::start(
+            self.app.clone(),
+            instance_id.clone(),
+            type_id.to_string(),
+            def,
+            self.cwd.clone(),
+            log_path,
+            status,
+            cmd_rx,
+            pending,
+            self.db.clone(),
+            cfg,
+        );
+
+        let _ = self.app.emit("instance-added", json!({
+            "instance_id": instance_id, "type_id": type_id, "name": name, "color": color
+        }));
+        Ok(instance_id)
+    }
+
+    /// Close an instance: drop its command channel (stops the adapter) and remove it.
+    pub fn close(&self, instance_id: &str) -> Result<(), String> {
+        {
+            let mut insts = self.instances.lock().unwrap();
+            let pos = insts
+                .iter()
+                .position(|i| i.instance_id == instance_id)
+                .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
+            insts.remove(pos); // drops cmd_tx -> client loop ends -> adapter killed
+        }
+        let _ = self.app.emit("instance-removed", json!({ "instance_id": instance_id }));
+        Ok(())
+    }
+
+    /// Restart a (stopped/errored) instance's connection, keeping its id.
+    pub fn retry(&self, instance_id: &str) -> Result<(), String> {
+        let (type_id, status, pending, cfg, cmd_rx) = {
+            let mut insts = self.instances.lock().unwrap();
+            let inst = insts
+                .iter_mut()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
+            let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+            inst.cmd_tx = Some(cmd_tx); // dropping the old sender stops the old loop
+            if let Ok(mut s) = inst.status.lock() {
+                *s = AcpStatus::Connecting;
+            }
+            (
+                inst.type_id.clone(),
+                inst.status.clone(),
+                inst.pending.clone(),
+                inst.config.clone(),
+                cmd_rx,
+            )
+        };
+        let def = self
+            .defs
+            .iter()
+            .find(|d| d.id == type_id)
+            .ok_or_else(|| format!("type gone: {type_id}"))?
+            .clone();
+        let log_path = self.log_dir.join(format!("acp-messages-{instance_id}.jsonl"));
+        client::start(
+            self.app.clone(),
+            instance_id.to_string(),
+            type_id,
+            def,
+            self.cwd.clone(),
+            log_path,
+            status,
+            cmd_rx,
+            pending,
+            self.db.clone(),
+            cfg,
+        );
+        Ok(())
+    }
+
+    pub fn list_instances(&self) -> Vec<InstanceInfo> {
+        self.instances
+            .lock()
+            .map(|insts| {
+                insts
+                    .iter()
+                    .map(|i| InstanceInfo {
+                        instance_id: i.instance_id.clone(),
+                        type_id: i.type_id.clone(),
+                        name: i.name.clone(),
+                        color: i.color.clone(),
+                    })
+                    .collect()
             })
+            .unwrap_or_default()
+    }
+
+    pub fn list_types(&self) -> Vec<TypeInfo> {
+        self.defs
+            .iter()
+            .map(|d| TypeInfo { type_id: d.id.clone(), name: d.name.clone(), color: d.color.clone() })
             .collect()
     }
 
-    fn agent(&self, id: &str) -> Option<&AgentHandle> {
-        self.agents.iter().find(|h| h.def.id == id)
+    fn sender(&self, instance_id: &str) -> Option<mpsc::UnboundedSender<AcpCommand>> {
+        self.instances
+            .lock()
+            .ok()?
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .and_then(|i| i.cmd_tx.clone())
     }
 
-    fn send(&self, agent_id: &str, cmd: AcpCommand) -> Result<(), String> {
-        let h = self.agent(agent_id).ok_or_else(|| format!("unknown agent: {agent_id}"))?;
-        h.cmd_tx
+    fn send(&self, instance_id: &str, cmd: AcpCommand) -> Result<(), String> {
+        self.sender(instance_id)
+            .ok_or_else(|| format!("instance {instance_id} is not running"))?
             .send(cmd)
-            .map_err(|_| format!("agent {agent_id} is not running"))
+            .map_err(|_| format!("instance {instance_id} is not running"))
     }
 
-    pub fn send_prompt(&self, agent_id: &str, text: String) -> Result<(), String> {
-        self.send(agent_id, AcpCommand::Prompt(text))
+    pub fn send_prompt(&self, instance_id: &str, text: String) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::Prompt(text))
+    }
+    pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::NewSession)
+    }
+    pub fn resume_session(&self, instance_id: &str, db_id: String) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::Resume(db_id))
+    }
+    pub fn set_mode(&self, instance_id: &str, mode_id: String) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::SetMode(mode_id))
+    }
+    pub fn set_model(&self, instance_id: &str, model_id: String) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::SetModel(model_id))
     }
 
-    pub fn new_session(&self, agent_id: &str) -> Result<(), String> {
-        self.send(agent_id, AcpCommand::NewSession)
-    }
-
-    pub fn resume_session(&self, agent_id: &str, db_id: String) -> Result<(), String> {
-        self.send(agent_id, AcpCommand::Resume(db_id))
-    }
-
-    pub fn respond_permission(&self, agent_id: &str, request_id: String, choice: String) {
-        if let Some(h) = self.agent(agent_id) {
-            if let Ok(mut map) = h.pending.lock() {
+    pub fn respond_permission(&self, instance_id: &str, request_id: String, choice: String) {
+        let pending = self
+            .instances
+            .lock()
+            .ok()
+            .and_then(|insts| insts.iter().find(|i| i.instance_id == instance_id).map(|i| i.pending.clone()));
+        if let Some(p) = pending {
+            if let Ok(mut map) = p.lock() {
                 if let Some(tx) = map.remove(&request_id) {
                     let _ = tx.send(choice);
                 }
@@ -155,7 +289,23 @@ impl AcpManager {
         }
     }
 
-    /// Clone of the DB handle for read-only queries from async commands.
+    pub fn agent_config(&self, instance_id: &str) -> serde_json::Value {
+        self.instances
+            .lock()
+            .ok()
+            .and_then(|insts| insts.iter().find(|i| i.instance_id == instance_id).map(|i| i.config.lock().map(|c| c.clone()).unwrap_or(serde_json::Value::Null)))
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    pub fn type_of(&self, instance_id: &str) -> Option<String> {
+        self.instances
+            .lock()
+            .ok()?
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .map(|i| i.type_id.clone())
+    }
+
     pub fn db_handle(&self) -> Arc<Db> {
         self.db.clone()
     }

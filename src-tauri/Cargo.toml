@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,7 +27,7 @@ serde_json = "1"
 # The crate spawns the agent subprocess itself (via async_process) and runs the
 # whole client as one future, so no direct tokio/tokio-util needed — we drive it
 # on Tauri's runtime via tauri::async_runtime::spawn.
-agent-client-protocol = "=0.12.1"
+agent-client-protocol = { version = "=0.12.1", features = ["unstable_session_model"] }
 tokio = { version = "1", features = ["sync"] }
 anyhow = "1"
 tracing = "0.1"

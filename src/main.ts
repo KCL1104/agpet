@@ -1,9 +1,8 @@
-// Milestone 3 (slice 1): one walking pet per agent (Claude / Codex / OpenCode).
-// Each pet reflects its agent's ACP state; clicking a pet opens that agent's own
-// chat panel. Per-agent transcripts are kept in separate DOM containers so
-// switching pets preserves each conversation. The backend tags every event with
-// `agent_id`; we route to the right pet/panel and report all pet rects so the
-// backend can toggle click-through.
+// Milestone 3 + UX: one walking pet per running agent *instance* (multiple of
+// the same type allowed). Each pet reflects its instance's ACP state; clicking
+// opens that instance's own chat panel. Per-instance transcripts live in
+// separate DOM containers. Backend events are tagged with `instance_id`;
+// instances can be added/removed at runtime (tray).
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -21,25 +20,27 @@ const MARGIN_BOTTOM = 28;
 let baselineY = 0;
 let last = performance.now();
 
-interface AgentInfo {
-  id: string;
+interface InstanceInfo {
+  instance_id: string;
+  type_id: string;
   name: string;
   color: string;
 }
 
 interface Pet {
-  id: string;
+  id: string; // instance_id
   name: string;
   color: string;
   x: number;
   dir: 1 | -1;
   state: string;
   detail: string;
-  revertAt: number; // transient "completed" -> idle
-  container: HTMLDivElement; // per-agent transcript
+  revertAt: number;
+  container: HTMLDivElement;
   currentAgent: HTMLDivElement | null;
   currentThinking: HTMLDivElement | null;
   toolChips: Map<string, HTMLDivElement>;
+  cfg: any; // agent-config: auth_methods / models / modes
 }
 
 const pets: Pet[] = [];
@@ -62,8 +63,6 @@ function meta(state: string) {
   return STATE_META[state] ?? STATE_META.idle;
 }
 
-// --- DOM refs -------------------------------------------------------------
-
 const panel = document.getElementById("chat-panel") as HTMLDivElement;
 const messagesHost = document.getElementById("chat-messages") as HTMLDivElement;
 const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
@@ -78,6 +77,208 @@ const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
 const statusText = document.getElementById("status-text") as HTMLSpanElement;
 const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
 const avatarEl = document.getElementById("pet-avatar") as HTMLSpanElement;
+const settingsBtn = document.getElementById("chat-settings") as HTMLButtonElement;
+const settingsPopover = document.getElementById("settings-popover") as HTMLDivElement;
+const setModelSel = document.getElementById("set-model") as HTMLSelectElement;
+const setModeSel = document.getElementById("set-mode") as HTMLSelectElement;
+const setFontSeg = document.getElementById("set-font") as HTMLDivElement;
+const setDensitySeg = document.getElementById("set-density") as HTMLDivElement;
+const statusBar = document.getElementById("status-bar") as HTMLDivElement;
+const resizeHandle = document.getElementById("resize-handle") as HTMLDivElement;
+const headerEl = document.querySelector(".chat-header") as HTMLDivElement;
+
+// Theme the panel to the selected agent's brand colour.
+function applyTheme(color: string) {
+  document.documentElement.style.setProperty("--accent", color);
+  document.documentElement.style.setProperty("--accent-soft", color + "28");
+}
+
+// Show a login/retry bar for instances that aren't connected.
+function updateStatusBar(pet: Pet) {
+  if (pet.id !== selected) return;
+  const needs = ["auth_required", "error", "exited"].includes(pet.state);
+  if (!needs) {
+    statusBar.classList.add("hidden");
+    statusBar.innerHTML = "";
+    return;
+  }
+  statusBar.innerHTML = "";
+  const msg = document.createElement("div");
+  msg.className = "sb-msg";
+  msg.textContent =
+    pet.state === "auth_required" ? `${pet.name} needs login.` :
+    pet.state === "exited" ? `${pet.name} is offline.` : `${pet.name} hit an error.`;
+  statusBar.appendChild(msg);
+
+  const methods = pet.cfg?.auth_methods;
+  if (pet.state === "auth_required" && Array.isArray(methods) && methods.length) {
+    const hint = document.createElement("div");
+    hint.className = "sb-hint";
+    hint.textContent = "Login options:\n" +
+      methods.map((m: any) => `• ${m.name}${m.description ? " — " + m.description : ""}`).join("\n");
+    statusBar.appendChild(hint);
+  }
+  const btn = document.createElement("button");
+  btn.className = "sb-retry";
+  btn.textContent = "Retry connection";
+  btn.addEventListener("click", () => {
+    invoke("retry_agent", { instance: pet.id }).catch(() => {});
+    statusBar.classList.add("hidden");
+  });
+  statusBar.appendChild(btn);
+  statusBar.classList.remove("hidden");
+}
+
+// Settings popover: model / mode (per instance) + font / density (global).
+function populateSettings(pet: Pet) {
+  const models = pet.cfg?.models;
+  const avail: any[] = models?.availableModels ?? [];
+  setModelSel.innerHTML = "";
+  if (avail.length === 0) {
+    setModelSel.innerHTML = `<option>(not available)</option>`;
+    setModelSel.disabled = true;
+  } else {
+    setModelSel.disabled = false;
+    for (const m of avail) {
+      const o = document.createElement("option");
+      o.value = m.modelId;
+      o.textContent = m.name ?? m.modelId;
+      if (m.modelId === models?.currentModelId) o.selected = true;
+      setModelSel.appendChild(o);
+    }
+  }
+  const modes = pet.cfg?.modes;
+  const am: any[] = modes?.availableModes ?? [];
+  setModeSel.innerHTML = "";
+  if (am.length === 0) {
+    setModeSel.innerHTML = `<option>(not available)</option>`;
+    setModeSel.disabled = true;
+  } else {
+    setModeSel.disabled = false;
+    for (const m of am) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.name ?? m.id;
+      if (m.id === modes?.currentModeId) o.selected = true;
+      setModeSel.appendChild(o);
+    }
+  }
+}
+
+settingsBtn.addEventListener("click", () => {
+  const pet = selectedPet();
+  if (!pet) return;
+  if (settingsPopover.classList.contains("hidden")) {
+    populateSettings(pet);
+    settingsPopover.classList.remove("hidden");
+  } else {
+    settingsPopover.classList.add("hidden");
+  }
+});
+setModelSel.addEventListener("change", () => {
+  const pet = selectedPet();
+  if (pet) invoke("set_model", { instance: pet.id, model: setModelSel.value }).catch(() => {});
+});
+setModeSel.addEventListener("change", () => {
+  const pet = selectedPet();
+  if (pet) invoke("set_mode", { instance: pet.id, mode: setModeSel.value }).catch(() => {});
+});
+
+function markSeg(seg: HTMLDivElement, val: string) {
+  seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.getAttribute("data-v") === val));
+}
+function applyPrefs() {
+  const font = localStorage.getItem("agpet.font") || "m";
+  const density = localStorage.getItem("agpet.density") || "comfortable";
+  panel.classList.remove("font-s", "font-m", "font-l");
+  panel.classList.add("font-" + font);
+  panel.classList.toggle("density-compact", density === "compact");
+  markSeg(setFontSeg, font);
+  markSeg(setDensitySeg, density);
+}
+setFontSeg.addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest("button");
+  if (!b) return;
+  localStorage.setItem("agpet.font", b.getAttribute("data-v")!);
+  applyPrefs();
+});
+setDensitySeg.addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest("button");
+  if (!b) return;
+  localStorage.setItem("agpet.density", b.getAttribute("data-v")!);
+  applyPrefs();
+});
+
+// Drag (via header) + resize (top-left handle), persisted.
+function savePanelBox() {
+  const r = panel.getBoundingClientRect();
+  localStorage.setItem("agpet.box", JSON.stringify({ left: r.left, top: r.top, w: r.width, h: r.height }));
+}
+function loadPanelBox() {
+  const s = localStorage.getItem("agpet.box");
+  if (!s) return;
+  try {
+    const b = JSON.parse(s);
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = `${b.left}px`;
+    panel.style.top = `${b.top}px`;
+    panel.style.width = `${b.w}px`;
+    panel.style.height = `${b.h}px`;
+  } catch {}
+}
+let dragging = false;
+let dragOff = { x: 0, y: 0 };
+headerEl.addEventListener("pointerdown", (e) => {
+  if ((e.target as HTMLElement).closest("button")) return;
+  dragging = true;
+  const r = panel.getBoundingClientRect();
+  dragOff = { x: e.clientX - r.left, y: e.clientY - r.top };
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+  panel.style.left = `${r.left}px`;
+  panel.style.top = `${r.top}px`;
+  headerEl.setPointerCapture(e.pointerId);
+});
+headerEl.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const x = Math.max(0, Math.min(window.innerWidth - 80, e.clientX - dragOff.x));
+  const y = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - dragOff.y));
+  panel.style.left = `${x}px`;
+  panel.style.top = `${y}px`;
+});
+headerEl.addEventListener("pointerup", (e) => {
+  if (!dragging) return;
+  dragging = false;
+  headerEl.releasePointerCapture(e.pointerId);
+  savePanelBox();
+});
+let resizing = false;
+let rs = { mx: 0, my: 0, right: 0, bottom: 0 };
+resizeHandle.addEventListener("pointerdown", (e) => {
+  resizing = true;
+  const r = panel.getBoundingClientRect();
+  rs = { mx: e.clientX, my: e.clientY, right: r.right, bottom: r.bottom };
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+  resizeHandle.setPointerCapture(e.pointerId);
+  e.stopPropagation();
+});
+resizeHandle.addEventListener("pointermove", (e) => {
+  if (!resizing) return;
+  const w = Math.max(300, Math.min(720, rs.right - e.clientX));
+  const h = Math.max(320, Math.min(900, rs.bottom - e.clientY));
+  panel.style.width = `${w}px`;
+  panel.style.height = `${h}px`;
+  panel.style.left = `${rs.right - w}px`;
+  panel.style.top = `${rs.bottom - h}px`;
+});
+resizeHandle.addEventListener("pointerup", (e) => {
+  if (!resizing) return;
+  resizing = false;
+  resizeHandle.releasePointerCapture(e.pointerId);
+  savePanelBox();
+});
 
 function selectedPet(): Pet | undefined {
   return selected ? petById.get(selected) : undefined;
@@ -87,6 +288,10 @@ function updateEmpty() {
   const p = selectedPet();
   const has = p && p.container.querySelector(".msg, .tool");
   chatEmpty.style.display = has ? "none" : "flex";
+}
+
+function scrollToBottom() {
+  messagesHost.scrollTop = messagesHost.scrollHeight;
 }
 
 function addMsgTo(pet: Pet, cls: string, text: string): HTMLDivElement {
@@ -101,10 +306,6 @@ function addMsgTo(pet: Pet, cls: string, text: string): HTMLDivElement {
   return div;
 }
 
-function scrollToBottom() {
-  messagesHost.scrollTop = messagesHost.scrollHeight;
-}
-
 function resetTurn(pet: Pet) {
   pet.currentAgent = null;
   pet.currentThinking = null;
@@ -116,9 +317,8 @@ function refreshHeader() {
   titleEl.textContent = p.name;
   avatarEl.style.background = p.color + "33";
   avatarEl.style.boxShadow = `inset 0 0 0 1px ${p.color}`;
-  const m = meta(p.state);
   statusDot.style.background = p.color;
-  statusText.textContent = m.label || "idle";
+  statusText.textContent = meta(p.state).label || "idle";
 }
 
 function selectAgent(id: string) {
@@ -128,7 +328,13 @@ function selectAgent(id: string) {
   }
   historyView.classList.add("hidden");
   permBar.classList.add("hidden");
+  settingsPopover.classList.add("hidden");
   refreshHeader();
+  const p = petById.get(id);
+  if (p) {
+    applyTheme(p.color);
+    updateStatusBar(p);
+  }
   updateEmpty();
   scrollToBottom();
 }
@@ -151,7 +357,7 @@ function sendPrompt() {
   if (!pet || !text) return;
   addMsgTo(pet, "user", text);
   resetTurn(pet);
-  invoke("send_prompt", { agent: pet.id, text }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
+  invoke("send_prompt", { instance: pet.id, text }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
 }
 
@@ -167,7 +373,7 @@ inputEl.addEventListener("keydown", (e) => {
 newBtn.addEventListener("click", () => {
   const pet = selectedPet();
   if (!pet) return;
-  invoke("new_session", { agent: pet.id }).catch(() => {});
+  invoke("new_session", { instance: pet.id }).catch(() => {});
   addMsgTo(pet, "system", "Summarizing & starting a new session…");
 });
 
@@ -193,7 +399,7 @@ async function loadHistory() {
   if (!pet) return;
   historyView.innerHTML = `<div class="hist-empty">Loading…</div>`;
   try {
-    const rows = await invoke<SessionRow[]>("list_sessions", { agent: pet.id });
+    const rows = await invoke<SessionRow[]>("list_sessions", { instance: pet.id });
     historyView.innerHTML = "";
     if (!rows || rows.length === 0) {
       historyView.innerHTML = `<div class="hist-empty">No past sessions for ${pet.name} yet.</div>`;
@@ -212,7 +418,7 @@ async function loadHistory() {
       row.querySelector(".hist-status")!.textContent = r.status;
       row.querySelector(".hist-summary")!.textContent = text;
       row.querySelector(".hist-resume")!.addEventListener("click", () => {
-        invoke("resume_session", { agent: pet.id, id: r.id }).catch(() => {});
+        invoke("resume_session", { instance: pet.id, id: r.id }).catch(() => {});
         historyView.classList.add("hidden");
         clearTranscript(pet);
         addMsgTo(pet, "system", "Resuming previous session…");
@@ -235,12 +441,61 @@ function clearTranscript(pet: Pet) {
   }
 }
 
-// --- Backend events (routed by agent_id) ----------------------------------
+// --- Pet lifecycle --------------------------------------------------------
 
-interface PetStatePayload { agent_id: string; state: string; detail?: string | null; }
+function layoutPets() {
+  const w = window.innerWidth;
+  pets.forEach((p, i) => {
+    if (p.x === -1) p.x = Math.max(0, ((i + 1) * w) / (pets.length + 1) - PET_W / 2);
+  });
+}
+
+function addPet(info: InstanceInfo) {
+  if (petById.has(info.instance_id)) return;
+  const container = document.createElement("div");
+  container.className = "agent-transcript";
+  container.style.display = "none";
+  messagesHost.appendChild(container);
+  const pet: Pet = {
+    id: info.instance_id,
+    name: info.name,
+    color: info.color,
+    x: -1, // assigned by layoutPets
+    dir: pets.length % 2 === 0 ? 1 : -1,
+    state: "connecting",
+    detail: "",
+    revertAt: 0,
+    container,
+    currentAgent: null,
+    currentThinking: null,
+    toolChips: new Map(),
+    cfg: null,
+  };
+  pets.push(pet);
+  petById.set(pet.id, pet);
+  layoutPets();
+  if (!selected) selected = pet.id;
+}
+
+function removePet(id: string) {
+  const idx = pets.findIndex((p) => p.id === id);
+  if (idx < 0) return;
+  const [pet] = pets.splice(idx, 1);
+  pet.container.remove();
+  petById.delete(id);
+  if (selected === id) {
+    selected = pets[0]?.id ?? null;
+    if (selected) selectAgent(selected);
+    else closePanel();
+  }
+}
+
+// --- Backend events (routed by instance_id) -------------------------------
+
+interface PetStatePayload { instance_id: string; state: string; detail?: string | null; }
 
 listen<PetStatePayload>("pet-state", (event) => {
-  const pet = petById.get(event.payload.agent_id);
+  const pet = petById.get(event.payload.instance_id);
   if (!pet) return;
   pet.state = event.payload.state;
   pet.detail = event.payload.detail ?? "";
@@ -248,11 +503,24 @@ listen<PetStatePayload>("pet-state", (event) => {
     pet.revertAt = performance.now() + 2200;
     resetTurn(pet);
   }
-  if (pet.id === selected) refreshHeader();
+  if (pet.id === selected) {
+    refreshHeader();
+    updateStatusBar(pet);
+  }
+});
+
+listen<any>("agent-config", (event) => {
+  const pet = petById.get(event.payload.instance_id);
+  if (!pet) return;
+  pet.cfg = event.payload;
+  if (pet.id === selected) {
+    updateStatusBar(pet);
+    if (!settingsPopover.classList.contains("hidden")) populateSettings(pet);
+  }
 });
 
 interface ChatEvent {
-  agent_id: string;
+  instance_id: string;
   kind: string;
   text?: string;
   tool_call_id?: string | null;
@@ -262,7 +530,7 @@ interface ChatEvent {
 
 listen<ChatEvent>("chat-event", (event) => {
   const ev = event.payload;
-  const pet = petById.get(ev.agent_id);
+  const pet = petById.get(ev.instance_id);
   if (!pet) return;
   switch (ev.kind) {
     case "agent_message": {
@@ -316,19 +584,19 @@ listen<ChatEvent>("chat-event", (event) => {
 });
 
 interface PermissionOption { optionId: string; name: string; kind: string; }
-interface PermissionRequest { agent_id: string; request_id: string; title: string; options: PermissionOption[]; }
+interface PermissionRequest { instance_id: string; request_id: string; title: string; options: PermissionOption[]; }
 
 listen<PermissionRequest>("permission-request", (event) => {
-  const { agent_id, request_id, title, options } = event.payload;
-  const pet = petById.get(agent_id);
+  const { instance_id, request_id, title, options } = event.payload;
+  const pet = petById.get(instance_id);
   if (!pet) return;
-  openPanelFor(agent_id); // surface the request on its agent
+  openPanelFor(instance_id);
 
   permBar.innerHTML = "";
-  const titleEl2 = document.createElement("div");
-  titleEl2.className = "perm-title";
-  titleEl2.textContent = `${pet.name} — allow: ${title}?`;
-  permBar.appendChild(titleEl2);
+  const t = document.createElement("div");
+  t.className = "perm-title";
+  t.textContent = `${pet.name} — allow: ${title}?`;
+  permBar.appendChild(t);
 
   const btnRow = document.createElement("div");
   btnRow.className = "perm-buttons";
@@ -338,7 +606,7 @@ listen<PermissionRequest>("permission-request", (event) => {
     if (opt.kind?.includes("allow")) btn.classList.add("allow");
     if (opt.kind?.includes("reject")) btn.classList.add("reject");
     btn.addEventListener("click", () => {
-      invoke("respond_permission", { agent: agent_id, id: request_id, choice: opt.optionId }).catch(() => {});
+      invoke("respond_permission", { instance: instance_id, id: request_id, choice: opt.optionId }).catch(() => {});
       permBar.classList.add("hidden");
       permBar.innerHTML = "";
     });
@@ -348,9 +616,17 @@ listen<PermissionRequest>("permission-request", (event) => {
   permBar.classList.remove("hidden");
 });
 
-listen<{ agent_id: string }>("session-reset", (event) => {
-  const pet = petById.get(event.payload.agent_id);
+listen<{ instance_id: string }>("session-reset", (event) => {
+  const pet = petById.get(event.payload.instance_id);
   if (pet) clearTranscript(pet);
+});
+
+listen<InstanceInfo>("instance-added", (event) => {
+  addPet(event.payload);
+});
+
+listen<{ instance_id: string }>("instance-removed", (event) => {
+  removePet(event.payload.instance_id);
 });
 
 // --- Rendering ------------------------------------------------------------
@@ -400,6 +676,7 @@ function shade(hex: string, amt: number): string {
 }
 
 function drawPet(pet: Pet, now: number, dt: number, w: number) {
+  if (pet.x < 0) pet.x = 0;
   if (pet.state === "completed" && now >= pet.revertAt) {
     pet.state = "idle";
     pet.detail = "";
@@ -410,13 +687,8 @@ function drawPet(pet: Pet, now: number, dt: number, w: number) {
 
   if (m.walk) {
     pet.x += pet.dir * SPEED * dt;
-    if (pet.x <= 0) {
-      pet.x = 0;
-      pet.dir = 1;
-    } else if (pet.x + PET_W >= w) {
-      pet.x = w - PET_W;
-      pet.dir = -1;
-    }
+    if (pet.x <= 0) { pet.x = 0; pet.dir = 1; }
+    else if (pet.x + PET_W >= w) { pet.x = w - PET_W; pet.dir = -1; }
   }
 
   const phase = (now / 1000) * BOB_HZ * Math.PI * 2 + pet.x * 0.01;
@@ -425,18 +697,12 @@ function drawPet(pet: Pet, now: number, dt: number, w: number) {
   const y = baselineY + Math.abs(bob);
 
   ctx.globalAlpha = dim ? 0.5 : 1;
-
-  // Feet.
   ctx.fillStyle = shade(pet.color, -0.25);
   ctx.fillRect(pet.x + 12, y + PET_H, 14, 9 + step);
   ctx.fillRect(pet.x + PET_W - 26, y + PET_H, 14, 9 - step);
-
-  // Body.
   ctx.fillStyle = pet.color;
   roundRect(ctx, pet.x, y, PET_W, PET_H, 14);
   ctx.fill();
-
-  // Eye.
   const eyeCx = pet.dir === 1 ? pet.x + PET_W - 18 : pet.x + 18;
   const eyeCy = y + 24;
   ctx.fillStyle = "#ffffff";
@@ -447,10 +713,8 @@ function drawPet(pet: Pet, now: number, dt: number, w: number) {
   ctx.beginPath();
   ctx.arc(eyeCx + pet.dir * 2.5, eyeCy, 4, 0, Math.PI * 2);
   ctx.fill();
-
   ctx.globalAlpha = 1;
 
-  // Emote.
   if (m.emote) {
     ctx.font = "26px system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -458,7 +722,6 @@ function drawPet(pet: Pet, now: number, dt: number, w: number) {
     ctx.fillText(m.emote, pet.x + PET_W / 2, y - 18);
   }
 
-  // Name (+ state) label.
   const label = m.label ? `${pet.name} · ${m.label}` : pet.name;
   ctx.font = "12px system-ui, sans-serif";
   ctx.textAlign = "center";
@@ -492,40 +755,16 @@ canvas.addEventListener("click", (e) => {
 });
 
 async function init() {
-  let agents: AgentInfo[] = [];
   try {
-    agents = await invoke<AgentInfo[]>("list_agents");
+    const instances = await invoke<InstanceInfo[]>("list_instances");
+    for (const inst of instances) addPet(inst);
   } catch (e) {
-    console.error("list_agents failed", e);
+    console.error("list_instances failed", e);
   }
-  const w = window.innerWidth;
-  agents.forEach((a, i) => {
-    const container = document.createElement("div");
-    container.className = "agent-transcript";
-    container.style.display = "none";
-    messagesHost.appendChild(container);
-    const pet: Pet = {
-      id: a.id,
-      name: a.name,
-      color: a.color,
-      x: Math.max(0, ((i + 1) * w) / (agents.length + 1) - PET_W / 2),
-      dir: i % 2 === 0 ? 1 : -1,
-      state: "connecting",
-      detail: "",
-      revertAt: 0,
-      container,
-      currentAgent: null,
-      currentThinking: null,
-      toolChips: new Map(),
-    };
-    pets.push(pet);
-    petById.set(a.id, pet);
-  });
-  if (pets.length > 0) selected = pets[0].id;
 }
 
 window.addEventListener("resize", resize);
 resize();
-init().then(() => {
-  requestAnimationFrame(draw);
-});
+applyPrefs();
+loadPanelBox();
+init().then(() => requestAnimationFrame(draw));

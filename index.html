@@ -22,16 +22,35 @@
         <div class="chat-header-actions">
           <button id="chat-new" title="End &amp; summarize, start a new session">＋ New</button>
           <button id="chat-history" title="Past sessions">History</button>
+          <button id="chat-settings" title="Settings">⚙</button>
           <button id="chat-close" title="Close">×</button>
+        </div>
+      </div>
+      <div id="resize-handle" title="Resize"></div>
+      <div id="settings-popover" class="hidden">
+        <div class="set-group"><label>Model</label><select id="set-model"></select></div>
+        <div class="set-group"><label>Mode</label><select id="set-mode"></select></div>
+        <div class="set-group">
+          <label>Font</label>
+          <div class="seg" id="set-font">
+            <button data-v="s">S</button><button data-v="m">M</button><button data-v="l">L</button>
+          </div>
+        </div>
+        <div class="set-group">
+          <label>Density</label>
+          <div class="seg" id="set-density">
+            <button data-v="comfortable">Cozy</button><button data-v="compact">Compact</button>
+          </div>
         </div>
       </div>
       <div id="chat-messages">
         <div id="chat-empty" class="chat-empty">
           <div class="empty-emoji">🐾</div>
-          <div>Ask Claude anything.<br />I'll remember our chats across sessions.</div>
+          <div>Ask anything.<br />I'll remember our chats across sessions.</div>
         </div>
       </div>
       <div id="history-view" class="hidden"></div>
+      <div id="status-bar" class="hidden"></div>
       <div id="permission-bar" class="hidden"></div>
       <div class="chat-input-row">
         <textarea id="chat-input" rows="1" placeholder="Message Claude…  (Enter to send)"></textarea>

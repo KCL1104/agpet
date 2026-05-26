@@ -1,15 +1,16 @@
-//! Per-agent ACP client: spawn the adapter, run the handshake, map streaming
-//! `session/update` to pet states + chat events (tagged with the agent id),
-//! accept prompts, route permission requests, and persist sessions to SQLite.
-//! One instance runs per declared agent.
+//! Per-instance ACP client: spawn the adapter, run the handshake, map streaming
+//! `session/update` to pet states + chat events (tagged with the instance id),
+//! accept prompts, route permission requests, persist sessions (keyed by type
+//! id), and publish agent config (auth methods / models / modes).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
+    ContentBlock, InitializeRequest, ModelId, NewSessionRequest, PromptRequest, ProtocolVersion,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
+    SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification, SetSessionModeRequest,
+    SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
@@ -26,6 +27,7 @@ const PET_STATE_EVENT: &str = "pet-state";
 const CHAT_EVENT: &str = "chat-event";
 const PERMISSION_EVENT: &str = "permission-request";
 const SESSION_RESET_EVENT: &str = "session-reset";
+const AGENT_CONFIG_EVENT: &str = "agent-config";
 
 const SUMMARY_PROMPT: &str =
     "Summarize what this session accomplished in 2-3 sentences. Reply with only the summary, no preamble.";
@@ -33,20 +35,32 @@ const RESUME_PREFIX: &str = "You are continuing a previous session. Here is its 
 
 static PERM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn emit_state(app: &AppHandle, agent_id: &str, state: &str, detail: Option<String>) {
-    tracing::debug!(target: "acp.state", "[{agent_id}] -> {state}{}",
+fn emit_state(app: &AppHandle, instance_id: &str, state: &str, detail: Option<String>) {
+    tracing::debug!(target: "acp.state", "[{instance_id}] -> {state}{}",
         detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default());
-    let _ = app.emit(PET_STATE_EVENT, json!({ "agent_id": agent_id, "state": state, "detail": detail }));
+    let _ = app.emit(PET_STATE_EVENT, json!({ "instance_id": instance_id, "state": state, "detail": detail }));
+}
+
+/// Store the agent config and emit it to the frontend (auth methods / models / modes).
+fn publish_config(app: &AppHandle, instance_id: &str, cfg: &Arc<Mutex<serde_json::Value>>, mut value: serde_json::Value) {
+    if let Ok(mut c) = cfg.lock() {
+        *c = value.clone();
+    }
+    if let Some(o) = value.as_object_mut() {
+        o.insert("instance_id".into(), json!(instance_id));
+    }
+    let _ = app.emit(AGENT_CONFIG_EVENT, value);
 }
 
 fn cur_id(m: &Arc<Mutex<Option<String>>>) -> Option<String> {
     m.lock().ok().and_then(|g| g.clone())
 }
 
-/// Spawn one agent's adapter and drive its handshake + command loop.
 #[allow(clippy::too_many_arguments)]
 pub fn start(
     app: AppHandle,
+    instance_id: String,
+    type_id: String,
     def: AgentDef,
     cwd: std::path::PathBuf,
     message_log_path: std::path::PathBuf,
@@ -54,47 +68,48 @@ pub fn start(
     cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     pending: PendingPermissions,
     db: Arc<Db>,
+    agent_cfg: Arc<Mutex<serde_json::Value>>,
 ) {
-    // Claude Code refuses to nest; clear the guard for spawned adapters.
     if std::env::var_os("CLAUDECODE").is_some() {
         std::env::remove_var("CLAUDECODE");
     }
 
-    let agent_id = def.id.clone();
     let message_log = match MessageLog::open(&message_log_path) {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("[{agent_id}] cannot open message log: {e}");
+            tracing::error!("[{instance_id}] cannot open message log: {e}");
             set_status(&status, AcpStatus::Error { message: format!("open message log: {e}") });
             return;
         }
     };
 
     let argv = def.argv();
+    let agent_name = def.name.clone();
     let workdir = cwd.to_string_lossy().to_string();
-    tracing::info!("[{agent_id}] starting adapter: {argv:?} (cwd {})", cwd.display());
+    tracing::info!("[{instance_id}] starting adapter: {argv:?} (cwd {})", cwd.display());
 
     let current_db_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let turn_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let pending_context: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     tauri::async_runtime::spawn(async move {
-        let aid_notif = agent_id.clone();
-        let aid_perm = agent_id.clone();
-        let aid_main = agent_id.clone();
+        let iid_notif = instance_id.clone();
+        let iid_perm = instance_id.clone();
+        let iid_main = instance_id.clone();
+        let type_main = type_id.clone();
 
         let log_for_debug = message_log.clone();
         let agent = match AcpAgent::from_args(argv) {
             Ok(a) => a.with_debug(move |line, dir| log_for_debug.record(dir, line)),
             Err(e) => {
                 set_status(&status, AcpStatus::Error { message: format!("build agent command: {e}") });
-                emit_state(&app, &agent_id, "error", Some(format!("{e}")));
+                emit_state(&app, &instance_id, "error", Some(format!("{e}")));
                 return;
             }
         };
 
         set_status(&status, AcpStatus::Connecting);
-        emit_state(&app, &agent_id, "connecting", None);
+        emit_state(&app, &instance_id, "connecting", None);
 
         let status_main = status.clone();
         let cwd_main = cwd.clone();
@@ -109,6 +124,7 @@ pub fn start(
         let turn_notif = turn_text.clone();
         let turn_main = turn_text.clone();
         let ctx_main = pending_context.clone();
+        let cfg_main = agent_cfg.clone();
 
         let result = agent_client_protocol::Client
             .builder()
@@ -116,11 +132,11 @@ pub fn start(
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx| {
                     if let Some((state, detail)) = map_update(&notification) {
-                        emit_state(&app_notif, &aid_notif, state, detail);
+                        emit_state(&app_notif, &iid_notif, state, detail);
                     }
                     if let Some(mut ev) = chat_event(&notification) {
                         if let Some(obj) = ev.as_object_mut() {
-                            obj.insert("agent_id".into(), json!(aid_notif));
+                            obj.insert("instance_id".into(), json!(iid_notif));
                         }
                         let _ = app_notif.emit(CHAT_EVENT, ev);
                     }
@@ -149,9 +165,9 @@ pub fn start(
                     if let Ok(mut m) = pending_perm.lock() {
                         m.insert(request_id.clone(), tx);
                     }
-                    emit_state(&app_perm, &aid_perm, "permission", Some(title.clone()));
+                    emit_state(&app_perm, &iid_perm, "permission", Some(title.clone()));
                     let _ = app_perm.emit(PERMISSION_EVENT, json!({
-                        "agent_id": aid_perm, "request_id": request_id, "title": title, "options": options_json,
+                        "instance_id": iid_perm, "request_id": request_id, "title": title, "options": options_json,
                     }));
 
                     let chosen = rx.await.ok();
@@ -177,44 +193,59 @@ pub fn start(
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(agent, move |conn: ConnectionTo<Agent>| async move {
-                let _init = match conn
+                // initialize
+                let init = match conn
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task().await
                 {
                     Ok(r) => r,
                     Err(e) => {
                         set_status(&status_main, AcpStatus::Error { message: format!("initialize failed: {e}") });
-                        emit_state(&app_main, &aid_main, "error", Some("initialize failed".into()));
+                        emit_state(&app_main, &iid_main, "error", Some("initialize failed".into()));
                         return Ok(());
                     }
                 };
+                let init_json = serde_json::to_value(&init).unwrap_or_default();
+                publish_config(&app_main, &iid_main, &cfg_main, json!({
+                    "agent_info": init_json.get("agentInfo"),
+                    "auth_methods": init_json.get("authMethods"),
+                }));
 
-                let mut acp_session: SessionId = match conn
+                // session/new
+                let sess = match conn
                     .send_request(NewSessionRequest::new(cwd_main.clone()))
                     .block_task().await
                 {
-                    Ok(r) => r.session_id,
+                    Ok(r) => r,
                     Err(e) => {
                         let msg = e.to_string();
                         let (st, state) = if is_auth_required(&msg) {
-                            (AcpStatus::AuthRequired { message: format!("{} login required.", aid_main) }, "auth_required")
+                            (AcpStatus::AuthRequired { message: format!("{agent_name} needs login.") }, "auth_required")
                         } else {
                             (AcpStatus::Error { message: format!("session/new failed: {msg}") }, "error")
                         };
                         set_status(&status_main, st);
-                        emit_state(&app_main, &aid_main, state, None);
+                        emit_state(&app_main, &iid_main, state, None);
                         return Ok(());
                     }
                 };
+                let sess_json = serde_json::to_value(&sess).unwrap_or_default();
+                let mut acp_session: SessionId = sess.session_id;
 
-                let session_id_str = acp_session.0.to_string();
-                tracing::info!("[{aid_main}] handshake complete (session {session_id_str})");
-                set_status(&status_main, AcpStatus::Connected { session_id: session_id_str });
-                match db_main.create_session(&aid_main, Some(&workdir), None, None).await {
+                publish_config(&app_main, &iid_main, &cfg_main, json!({
+                    "agent_info": init_json.get("agentInfo"),
+                    "auth_methods": init_json.get("authMethods"),
+                    "models": sess_json.get("models"),
+                    "modes": sess_json.get("modes"),
+                }));
+
+                tracing::info!("[{iid_main}] handshake complete (session {})", acp_session.0);
+                set_status(&status_main, AcpStatus::Connected { session_id: acp_session.0.to_string() });
+                match db_main.create_session(&type_main, Some(&workdir), None, None).await {
                     Ok(id) => { if let Ok(mut g) = cur_id_main.lock() { *g = Some(id); } }
-                    Err(e) => tracing::error!("[{aid_main}] create_session failed: {e}"),
+                    Err(e) => tracing::error!("[{iid_main}] create_session failed: {e}"),
                 }
-                emit_state(&app_main, &aid_main, "idle", None);
+                emit_state(&app_main, &iid_main, "idle", None);
 
                 let mut rx = cmd_rx;
                 while let Some(cmd) = rx.recv().await {
@@ -239,45 +270,55 @@ pub fn start(
                                             let _ = db_main.append_event(&id, "agent_message", &json!({"text": agent_text}).to_string()).await;
                                         }
                                     }
-                                    emit_state(&app_main, &aid_main, "completed", None);
+                                    emit_state(&app_main, &iid_main, "completed", None);
                                 }
                                 Err(e) => {
-                                    tracing::warn!("[{aid_main}] prompt failed: {e}");
-                                    emit_state(&app_main, &aid_main, "error", Some("prompt failed".into()));
+                                    tracing::warn!("[{iid_main}] prompt failed: {e}");
+                                    emit_state(&app_main, &iid_main, "error", Some("prompt failed".into()));
                                 }
                             }
                         }
                         AcpCommand::NewSession => {
                             if let Some(id) = cur_id(&cur_id_main) {
-                                summarize_and_finish(&conn, &acp_session, &db_main, &id, &turn_main, &app_main, &aid_main).await;
+                                summarize_and_finish(&conn, &acp_session, &db_main, &id, &turn_main, &app_main, &iid_main).await;
                             }
-                            match open_session(&conn, &cwd_main, &db_main, &aid_main, &workdir, None).await {
+                            match open_session(&conn, &cwd_main, &db_main, &type_main, &workdir, None).await {
                                 Some((new_acp, new_id)) => {
                                     acp_session = new_acp;
                                     if let Ok(mut g) = cur_id_main.lock() { *g = Some(new_id); }
                                     if let Ok(mut g) = ctx_main.lock() { *g = None; }
-                                    let _ = app_main.emit(SESSION_RESET_EVENT, json!({"agent_id": aid_main}));
-                                    emit_state(&app_main, &aid_main, "idle", None);
+                                    let _ = app_main.emit(SESSION_RESET_EVENT, json!({"instance_id": iid_main}));
+                                    emit_state(&app_main, &iid_main, "idle", None);
                                 }
-                                None => emit_state(&app_main, &aid_main, "error", Some("new session failed".into())),
+                                None => emit_state(&app_main, &iid_main, "error", Some("new session failed".into())),
                             }
+                        }
+                        AcpCommand::SetMode(mode_id) => {
+                            let _ = conn
+                                .send_request(SetSessionModeRequest::new(acp_session.clone(), SessionModeId::new(mode_id)))
+                                .block_task().await;
+                        }
+                        AcpCommand::SetModel(model_id) => {
+                            let _ = conn
+                                .send_request(SetSessionModelRequest::new(acp_session.clone(), ModelId::new(model_id)))
+                                .block_task().await;
                         }
                         AcpCommand::Resume(prev_id) => {
                             if let Some(id) = cur_id(&cur_id_main) {
-                                summarize_and_finish(&conn, &acp_session, &db_main, &id, &turn_main, &app_main, &aid_main).await;
+                                summarize_and_finish(&conn, &acp_session, &db_main, &id, &turn_main, &app_main, &iid_main).await;
                             }
                             let prev_summary = db_main.get_session(&prev_id).await.ok().flatten().and_then(|r| r.summary);
-                            match open_session(&conn, &cwd_main, &db_main, &aid_main, &workdir, Some(&prev_id)).await {
+                            match open_session(&conn, &cwd_main, &db_main, &type_main, &workdir, Some(&prev_id)).await {
                                 Some((new_acp, new_id)) => {
                                     acp_session = new_acp;
                                     if let Ok(mut g) = cur_id_main.lock() { *g = Some(new_id); }
                                     if let Ok(mut g) = ctx_main.lock() {
                                         *g = prev_summary.map(|s| format!("{RESUME_PREFIX}{s}"));
                                     }
-                                    let _ = app_main.emit(SESSION_RESET_EVENT, json!({"agent_id": aid_main, "resumed_from": prev_id}));
-                                    emit_state(&app_main, &aid_main, "idle", None);
+                                    let _ = app_main.emit(SESSION_RESET_EVENT, json!({"instance_id": iid_main, "resumed_from": prev_id}));
+                                    emit_state(&app_main, &iid_main, "idle", None);
                                 }
-                                None => emit_state(&app_main, &aid_main, "error", Some("resume failed".into())),
+                                None => emit_state(&app_main, &iid_main, "error", Some("resume failed".into())),
                             }
                         }
                     }
@@ -291,16 +332,16 @@ pub fn start(
                 if let Ok(mut g) = status.lock() {
                     if matches!(*g, AcpStatus::Connected { .. } | AcpStatus::Connecting) {
                         *g = AcpStatus::Exited { message: "adapter process ended".into() };
-                        emit_state(&app, &agent_id, "exited", None);
+                        emit_state(&app, &instance_id, "exited", None);
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("[{agent_id}] connection ended: {e}");
+                tracing::error!("[{instance_id}] connection ended: {e}");
                 if let Ok(mut g) = status.lock() {
                     if !matches!(*g, AcpStatus::AuthRequired { .. } | AcpStatus::Error { .. }) {
                         *g = AcpStatus::Exited { message: e.to_string() };
-                        emit_state(&app, &agent_id, "exited", None);
+                        emit_state(&app, &instance_id, "exited", None);
                     }
                 }
             }
@@ -316,10 +357,10 @@ async fn summarize_and_finish(
     db_id: &str,
     turn_text: &Arc<Mutex<String>>,
     app: &AppHandle,
-    agent_id: &str,
+    instance_id: &str,
 ) {
     if let Ok(mut t) = turn_text.lock() { t.clear(); }
-    emit_state(app, agent_id, "thinking", Some("summarizing".into()));
+    emit_state(app, instance_id, "thinking", Some("summarizing".into()));
     let summary = match conn
         .send_request(PromptRequest::new(
             acp_session.clone(),
@@ -332,21 +373,20 @@ async fn summarize_and_finish(
             (!s.trim().is_empty()).then_some(s)
         }
         Err(e) => {
-            tracing::warn!("[{agent_id}] summary prompt failed: {e}");
+            tracing::warn!("[{instance_id}] summary prompt failed: {e}");
             None
         }
     };
     if let Err(e) = db.finish_session(db_id, summary.as_deref(), "completed").await {
-        tracing::warn!("[{agent_id}] finish_session failed: {e}");
+        tracing::warn!("[{instance_id}] finish_session failed: {e}");
     }
 }
 
-/// Open a fresh ACP session on the existing connection and create its DB row.
 async fn open_session(
     conn: &ConnectionTo<Agent>,
     cwd: &std::path::Path,
     db: &Db,
-    agent_id: &str,
+    type_id: &str,
     workdir: &str,
     parent: Option<&str>,
 ) -> Option<(SessionId, String)> {
@@ -356,11 +396,11 @@ async fn open_session(
     {
         Ok(r) => r.session_id,
         Err(e) => {
-            tracing::warn!("[{agent_id}] session/new failed: {e}");
+            tracing::warn!("session/new failed: {e}");
             return None;
         }
     };
-    let db_id = db.create_session(agent_id, Some(workdir), None, parent).await.ok()?;
+    let db_id = db.create_session(type_id, Some(workdir), None, parent).await.ok()?;
     Some((acp, db_id))
 }
 
