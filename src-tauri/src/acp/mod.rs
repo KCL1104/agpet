@@ -115,9 +115,9 @@ pub struct AcpManager {
     /// agpet's MCP server URL (delegate tool); attached to sessions that support
     /// HTTP MCP. None if the server failed to start.
     mcp_url: Option<String>,
-    /// Pending non-blocking delegations: handle -> the sub-agent's result
-    /// receiver, awaited later by `collect`.
-    delegations: Mutex<HashMap<String, oneshot::Receiver<Result<String, String>>>>,
+    /// Pending non-blocking delegations: handle -> (worker instance to auto-close
+    /// once collected, if it was a spawned worktree worker; result receiver).
+    delegations: Mutex<HashMap<String, (Option<String>, oneshot::Receiver<Result<String, String>>)>>,
     delegation_seq: AtomicU64,
 }
 
@@ -370,14 +370,15 @@ impl AcpManager {
     /// once. Refuses **busy** targets so a blocked orchestrator / delegation
     /// cycle can't deadlock.
     pub async fn delegate(&self, agent: &str, task: String, wait: bool) -> Result<String, String> {
-        // Resolve the named target → its type + repo + (fallback) sender.
-        let (target_type, target_cwd, target_name, existing_tx, existing_busy) = {
+        // Resolve the named target → its id + type + repo + (fallback) sender.
+        let (target_id, target_type, target_cwd, target_name, existing_tx, existing_busy) = {
             let insts = self.instances.lock().map_err(|_| "lock poisoned".to_string())?;
             let inst = insts
                 .iter()
                 .find(|i| i.instance_id == agent || i.name.eq_ignore_ascii_case(agent))
                 .ok_or_else(|| format!("no running agent named '{agent}'"))?;
             (
+                inst.instance_id.clone(),
                 inst.type_id.clone(),
                 inst.cwd.clone(),
                 inst.name.clone(),
@@ -390,56 +391,67 @@ impl AcpManager {
         // Prefer running the delegated work in an isolated git worktree: spawn a
         // fresh worker of the target's type into a new branch off its repo (the
         // named agent itself stays untouched). Fall back to routing to the
-        // existing agent when it isn't in a git repo.
-        let (tx, where_note) = if crate::git::is_repo(&target_cwd) {
+        // existing agent when it isn't in a git repo. `spawned` is the worker to
+        // auto-close once its result is collected (its worktree is kept).
+        let (tx, where_note, spawned) = if crate::git::is_repo(&target_cwd) {
             let branch = format!("agpet/delegate/{target_type}-{n}");
             let path = crate::git::worktree_create(&target_cwd, &branch)?;
             let worker_id = self.launch(&target_type, Some(path.to_string_lossy().into_owned()))?;
             let tx = self
                 .sender(&worker_id)
                 .ok_or_else(|| format!("worker {worker_id} failed to start"))?;
-            (tx, format!(" (worker in worktree {branch})"))
+            // 📦 fly the task from the named agent to its new worktree worker.
+            let _ = self.app.emit("workflow-handoff", json!({ "from_instance": target_id, "to_instance": worker_id }));
+            (tx, format!(" (worker in worktree {branch})"), Some(worker_id))
         } else {
             if existing_busy {
                 return Err(format!("agent '{target_name}' is busy — try again once it's idle"));
             }
             let tx = existing_tx.ok_or_else(|| format!("agent '{target_name}' is not running"))?;
-            (tx, String::new())
+            (tx, String::new(), None)
         };
 
         let (rtx, rrx) = oneshot::channel::<Result<String, String>>();
         tx.send(AcpCommand::RunStep { text: task, reply: rtx })
             .map_err(|_| format!("agent '{target_name}' stopped"))?;
         if !wait {
-            // Stash the result receiver under a handle so `collect` can fetch it
-            // after the caller has done its own work (it runs in the background).
+            // Stash the result receiver (+ worker to auto-close) under a handle so
+            // `collect` can fetch it after the caller has done its own work.
             let handle = format!("dlg-{n}");
             if let Ok(mut m) = self.delegations.lock() {
-                m.insert(handle.clone(), rrx);
+                m.insert(handle.clone(), (spawned, rrx));
             }
             return Ok(format!(
                 "dispatched{where_note} in the background (handle: {handle}). Do your own work, then call `collect` with handle \"{handle}\" to get its result."
             ));
         }
-        match rrx.await {
+        let result = match rrx.await {
             Ok(Ok(out)) => Ok(if where_note.is_empty() { out } else { format!("{out}{where_note}") }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(format!("agent '{target_name}' did not reply")),
+        };
+        if let Some(w) = spawned {
+            let _ = self.close(&w); // auto-close the worker pet (worktree is kept)
         }
+        result
     }
 
     /// Await and return the result of a delegation previously dispatched with
     /// `wait=false`, by its handle. Blocks until that sub-agent finishes (or
     /// returns immediately if it already has).
     pub async fn collect(&self, handle: &str) -> Result<String, String> {
-        let rrx = {
+        let (worker, rrx) = {
             let mut m = self.delegations.lock().map_err(|_| "lock poisoned".to_string())?;
             m.remove(handle).ok_or_else(|| format!("no pending delegation with handle '{handle}'"))?
         };
-        match rrx.await {
+        let result = match rrx.await {
             Ok(r) => r,
             Err(_) => Err(format!("delegation '{handle}' produced no result")),
+        };
+        if let Some(w) = worker {
+            let _ = self.close(&w); // auto-close the worker pet (worktree is kept)
         }
+        result
     }
     pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
         self.send(instance_id, AcpCommand::NewSession)
