@@ -22,8 +22,9 @@ struct DelegateArgs {
     agent: String,
     /// The task/prompt to give that agent.
     task: String,
-    /// Wait for the agent's result and return it (default true). Set false to
-    /// dispatch the task and return immediately without its result.
+    /// If true, block and return the agent's result. Default false: dispatch the
+    /// task and return immediately so you can keep working in parallel (the
+    /// agent runs concurrently and reports in its own chat).
     #[serde(default)]
     wait: Option<bool>,
 }
@@ -56,13 +57,14 @@ impl DelegateServer {
     }
 
     #[tool(
-        description = "Delegate a task to another agent by name. With wait=true (default) it \
-                       runs the agent and returns its result; with wait=false it dispatches and \
-                       returns immediately. Busy agents are refused."
+        description = "Delegate a task to another agent by name. Default (wait=false) dispatches \
+                       it to run in parallel and returns immediately so you can keep doing your \
+                       own work; pass wait=true only when you need that agent's result before \
+                       continuing. Busy agents are refused."
     )]
     async fn delegate(&self, Parameters(args): Parameters<DelegateArgs>) -> String {
         let mgr = self.app.state::<AcpManager>();
-        match mgr.delegate(&args.agent, args.task, args.wait.unwrap_or(true)).await {
+        match mgr.delegate(&args.agent, args.task, args.wait.unwrap_or(false)).await {
             Ok(out) => out,
             Err(e) => format!("Error: {e}"),
         }

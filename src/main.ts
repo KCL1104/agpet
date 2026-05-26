@@ -54,7 +54,11 @@ interface Pet {
   currentPlan: HTMLDivElement | null;
   toolChips: Map<string, HTMLDivElement>;
   cfg: any; // agent-config: auth_methods / models / modes
+  pendingPerm: PermissionRequest | null; // unanswered permission request, if any
 }
+
+interface PermissionOption { optionId: string; name: string; kind: string; }
+interface PermissionRequest { instance_id: string; request_id: string; title: string; options: PermissionOption[]; }
 
 const pets: Pet[] = [];
 const petById = new Map<string, Pet>();
@@ -566,13 +570,42 @@ titleEl.addEventListener("click", () => {
   input.addEventListener("blur", () => commit(true));
 });
 
+// Render the Allow/Deny bar from a pet's stored pending permission (or hide it).
+function renderPermBar(pet: Pet | undefined) {
+  permBar.innerHTML = "";
+  const req = pet?.pendingPerm;
+  if (!pet || !req) {
+    permBar.classList.add("hidden");
+    return;
+  }
+  const t = document.createElement("div");
+  t.className = "perm-title";
+  t.textContent = `${pet.name} — allow: ${req.title}?`;
+  permBar.appendChild(t);
+  const btnRow = document.createElement("div");
+  btnRow.className = "perm-buttons";
+  for (const opt of req.options ?? []) {
+    const btn = document.createElement("button");
+    btn.textContent = opt.name;
+    if (opt.kind?.includes("allow")) btn.classList.add("allow");
+    if (opt.kind?.includes("reject")) btn.classList.add("reject");
+    btn.addEventListener("click", () => {
+      invoke("respond_permission", { instance: pet.id, id: req.request_id, choice: opt.optionId }).catch(() => {});
+      pet.pendingPerm = null;
+      if (pet.id === selected) renderPermBar(pet);
+    });
+    btnRow.appendChild(btn);
+  }
+  permBar.appendChild(btnRow);
+  permBar.classList.remove("hidden");
+}
+
 function selectAgent(id: string) {
   selected = id;
   for (const p of pets) {
     p.container.style.display = p.id === id ? "flex" : "none";
   }
   historyView.classList.add("hidden");
-  permBar.classList.add("hidden");
   settingsPopover.classList.add("hidden");
   refreshHeader();
   const p = petById.get(id);
@@ -580,6 +613,7 @@ function selectAgent(id: string) {
     applyTheme(p.color);
     updateStatusBar(p);
   }
+  renderPermBar(p); // re-show this pet's pending permission (if any)
   updateInputControls();
   hidePicker();
   updateEmpty();
@@ -888,7 +922,10 @@ function dispatchOrchestrate(targets: Target[], text: string, files: string[], i
   if (!cur) return;
   const names = targets.map((t) => petById.get(t.id)?.name).filter((n): n is string => !!n);
   const note = names.length
-    ? `\n\n(You can delegate subtasks to these agents with the \`delegate\` tool: ${names.join(", ")}. Do your own part directly.)`
+    ? `\n\n(Do your own part of this yourself, and start on it right away — don't wait on the others. ` +
+      `For the parts meant for ${names.join(", ")}, hand them off with the \`delegate\` tool using wait:false ` +
+      `so they run in parallel (each reports in its own chat). Only use wait:true for a piece whose result you ` +
+      `genuinely need before you can continue.)`
     : "";
   addMsgTo(cur, "user", text); // show the original prompt in the mother's transcript
   resetTurn(cur);
@@ -1044,6 +1081,7 @@ function clearTranscript(pet: Pet) {
   pet.container.querySelectorAll(".msg, .tool, .plan").forEach((n) => n.remove());
   resetTurn(pet);
   pet.currentPlan = null;
+  pet.pendingPerm = null;
   pet.toolChips.clear();
   if (pet.id === selected) {
     permBar.classList.add("hidden");
@@ -1085,6 +1123,7 @@ function addPet(info: InstanceInfo) {
     currentPlan: null,
     toolChips: new Map(),
     cfg: null,
+    pendingPerm: null,
   };
   // Restore a dropped position from a previous run, if any. Instance ids are
   // deterministic across restarts (the counter resets), so this is best-effort
@@ -1323,37 +1362,15 @@ listen<ChatEvent>("chat-event", (event) => {
   }
 });
 
-interface PermissionOption { optionId: string; name: string; kind: string; }
-interface PermissionRequest { instance_id: string; request_id: string; title: string; options: PermissionOption[]; }
-
 listen<PermissionRequest>("permission-request", (event) => {
-  const { instance_id, request_id, title, options } = event.payload;
-  const pet = petById.get(instance_id);
+  const pet = petById.get(event.payload.instance_id);
   if (!pet) return;
-  openPanelFor(instance_id);
-
-  permBar.innerHTML = "";
-  const t = document.createElement("div");
-  t.className = "perm-title";
-  t.textContent = `${pet.name} — allow: ${title}?`;
-  permBar.appendChild(t);
-
-  const btnRow = document.createElement("div");
-  btnRow.className = "perm-buttons";
-  for (const opt of options ?? []) {
-    const btn = document.createElement("button");
-    btn.textContent = opt.name;
-    if (opt.kind?.includes("allow")) btn.classList.add("allow");
-    if (opt.kind?.includes("reject")) btn.classList.add("reject");
-    btn.addEventListener("click", () => {
-      invoke("respond_permission", { instance: instance_id, id: request_id, choice: opt.optionId }).catch(() => {});
-      permBar.classList.add("hidden");
-      permBar.innerHTML = "";
-    });
-    btnRow.appendChild(btn);
+  pet.pendingPerm = event.payload; // store per-pet so it survives switching away/back
+  if (pet.id === selected) {
+    renderPermBar(pet);
+  } else {
+    openPanelFor(pet.id); // surface the request (selectAgent → renderPermBar)
   }
-  permBar.appendChild(btnRow);
-  permBar.classList.remove("hidden");
 });
 
 listen<{ instance_id: string }>("session-reset", (event) => {
