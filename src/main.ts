@@ -1480,7 +1480,7 @@ function shade(hex: string, amt: number): string {
 
 interface LabelReq { text: string; cx: number; top: number; selected: boolean }
 
-function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, count: number): LabelReq {
+function drawPet(pet: Pet, now: number, dt: number, w: number): LabelReq {
   if (pet.state === "completed" && now >= pet.revertAt) {
     pet.state = "idle";
     pet.detail = "";
@@ -1494,12 +1494,13 @@ function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, coun
     // Follow the cursor during the drag (x + customY are set by mousemove).
     pet.x = Math.max(0, Math.min(w - PET_W, pet.x));
   } else {
-    // Roam a horizontal lane (at the pet's height) so they don't pile up.
-    const laneW = w / Math.max(1, count);
-    const minX = idx * laneW + 4;
-    const maxX = idx * laneW + laneW - PET_W - 4;
+    // Roam the full screen width. Pets start spread out (layoutPets) and with
+    // alternating directions (see addPet), so they don't move in lockstep even
+    // though each is free to cross the whole screen.
+    const minX = 4;
+    const maxX = w - PET_W - 4;
     if (maxX <= minX) {
-      pet.x = idx * laneW + Math.max(0, (laneW - PET_W) / 2);
+      pet.x = Math.max(0, (w - PET_W) / 2);
     } else {
       if (pet.x < minX) pet.x = minX;
       if (pet.x > maxX) pet.x = maxX;
@@ -1586,7 +1587,7 @@ function draw(now: number) {
   last = now;
   const w = window.innerWidth;
   ctx.clearRect(0, 0, w, window.innerHeight);
-  const labels = pets.map((pet, i) => drawPet(pet, now, dt, w, i, pets.length));
+  const labels = pets.map((pet) => drawPet(pet, now, dt, w));
   drawLabels(labels);
   drawHandoffs(now);
   reportRects(now);
