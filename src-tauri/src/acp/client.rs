@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, ModelId, NewSessionRequest, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification, SetSessionModeRequest,
-    SetSessionModelRequest, TextContent,
+    CancelNotification, ContentBlock, InitializeRequest, ModelId, NewSessionRequest, PromptRequest,
+    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResourceLink, SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification,
+    SetSessionModeRequest, SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
@@ -66,6 +66,7 @@ pub fn start(
     message_log_path: std::path::PathBuf,
     status: Arc<Mutex<AcpStatus>>,
     cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
+    cancel_rx: mpsc::UnboundedReceiver<()>,
     pending: PendingPermissions,
     db: Arc<Db>,
     agent_cfg: Arc<Mutex<serde_json::Value>>,
@@ -253,6 +254,7 @@ pub fn start(
                 emit_state(&app_main, &iid_main, "idle", None);
 
                 let mut rx = cmd_rx;
+                let mut cancel_rx = cancel_rx;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         AcpCommand::Prompt { text, files } => {
@@ -275,7 +277,20 @@ pub fn start(
                                 blocks.push(ContentBlock::ResourceLink(ResourceLink::new(rel.clone(), uri)));
                             }
                             let req = PromptRequest::new(acp_session.clone(), blocks);
-                            match conn.send_request(req).block_task().await {
+                            // Drop any stale cancel signals (e.g. Stop pressed while idle),
+                            // then race the turn against the Stop button.
+                            while cancel_rx.try_recv().is_ok() {}
+                            let mut prompt_fut = std::pin::pin!(conn.send_request(req).block_task());
+                            let result = loop {
+                                tokio::select! {
+                                    r = &mut prompt_fut => break r,
+                                    Some(_) = cancel_rx.recv() => {
+                                        let _ = conn.send_notification(CancelNotification::new(acp_session.clone()));
+                                        // keep awaiting the now-cancelled turn's response
+                                    }
+                                }
+                            };
+                            match result {
                                 Ok(_) => {
                                     record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
                                     emit_state(&app_main, &iid_main, "completed", None);
@@ -529,17 +544,47 @@ fn chat_event(notification: &SessionNotification) -> Option<serde_json::Value> {
             "tool_call_id": update.get("toolCallId"),
             "title": update.get("title"),
             "status": update.get("status"),
+            "tool_kind": update.get("kind"),     // read/edit/execute/search/…
+            "locations": tool_locations(update), // files this tool touches
         })),
         "tool_call_update" => Some(json!({
             "kind": "tool_update",
             "tool_call_id": update.get("toolCallId"),
             "status": update.get("status"),
+            "tool_kind": update.get("kind"),
             // The tool's result text (file contents, command output, …), if present.
             "result": update.get("content").and_then(extract_text),
+            "diff": tool_diff(update),           // file edit shown as old → new
+            "locations": tool_locations(update),
         })),
-        "plan" => Some(json!({ "kind": "plan" })),
+        "plan" => Some(json!({ "kind": "plan", "entries": update.get("entries") })),
+        "available_commands_update" => Some(json!({
+            "kind": "commands",
+            "commands": update.get("availableCommands"),
+        })),
         _ => None,
     }
+}
+
+/// File paths a tool call touches (for "follow-along" display).
+fn tool_locations(update: &serde_json::Value) -> Vec<String> {
+    update
+        .get("locations")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("path").and_then(|p| p.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// First file-edit diff in a tool call's content, as `{path, old, new}`.
+fn tool_diff(update: &serde_json::Value) -> Option<serde_json::Value> {
+    let arr = update.get("content")?.as_array()?;
+    arr.iter()
+        .find(|it| it.get("type").and_then(|t| t.as_str()) == Some("diff"))
+        .map(|d| json!({ "path": d.get("path"), "old": d.get("oldText"), "new": d.get("newText") }))
 }
 
 /// `file://` URI for an absolute path (forward slashes; works for both

@@ -68,6 +68,12 @@ fn list_dir_files(instance: String, state: tauri::State<'_, acp::AcpManager>) ->
     state.list_dir_files(&instance)
 }
 
+/// Cancel the in-flight prompt turn on an instance (Stop button).
+#[tauri::command]
+fn cancel_prompt(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.cancel(&instance)
+}
+
 #[tauri::command]
 fn respond_permission(instance: String, id: String, choice: String, state: tauri::State<'_, acp::AcpManager>) {
     state.respond_permission(&instance, id, choice);
@@ -149,6 +155,7 @@ pub fn run() {
             retry_agent,
             send_prompt,
             list_dir_files,
+            cancel_prompt,
             respond_permission,
             new_session,
             resume_session,

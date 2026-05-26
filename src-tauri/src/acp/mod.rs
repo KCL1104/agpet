@@ -81,6 +81,9 @@ struct Instance {
     cwd: PathBuf,
     status: Arc<Mutex<AcpStatus>>,
     cmd_tx: Option<mpsc::UnboundedSender<AcpCommand>>,
+    /// Out-of-band signal to cancel the in-flight prompt (the main cmd loop is
+    /// blocked awaiting the turn, so cancel rides its own channel).
+    cancel_tx: Option<mpsc::UnboundedSender<()>>,
     pending: PendingPermissions,
     /// Agent config (authMethods / models / modes) filled in by the client.
     config: Arc<Mutex<serde_json::Value>>,
@@ -149,6 +152,7 @@ impl AcpManager {
         let pending: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
         let cfg = Arc::new(Mutex::new(serde_json::Value::Null));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
 
         self.instances.lock().unwrap().push(Instance {
             instance_id: instance_id.clone(),
@@ -158,6 +162,7 @@ impl AcpManager {
             cwd: cwd_path.clone(),
             status: status.clone(),
             cmd_tx: Some(cmd_tx),
+            cancel_tx: Some(cancel_tx),
             pending: pending.clone(),
             config: cfg.clone(),
         });
@@ -172,6 +177,7 @@ impl AcpManager {
             log_path,
             status,
             cmd_rx,
+            cancel_rx,
             pending,
             self.db.clone(),
             cfg,
@@ -199,14 +205,16 @@ impl AcpManager {
 
     /// Restart a (stopped/errored) instance's connection, keeping its id.
     pub fn retry(&self, instance_id: &str) -> Result<(), String> {
-        let (type_id, cwd_path, status, pending, cfg, cmd_rx) = {
+        let (type_id, cwd_path, status, pending, cfg, cmd_rx, cancel_rx) = {
             let mut insts = self.instances.lock().unwrap();
             let inst = insts
                 .iter_mut()
                 .find(|i| i.instance_id == instance_id)
                 .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+            let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
             inst.cmd_tx = Some(cmd_tx); // dropping the old sender stops the old loop
+            inst.cancel_tx = Some(cancel_tx);
             if let Ok(mut s) = inst.status.lock() {
                 *s = AcpStatus::Connecting;
             }
@@ -217,6 +225,7 @@ impl AcpManager {
                 inst.pending.clone(),
                 inst.config.clone(),
                 cmd_rx,
+                cancel_rx,
             )
         };
         let def = self
@@ -235,6 +244,7 @@ impl AcpManager {
             log_path,
             status,
             cmd_rx,
+            cancel_rx,
             pending,
             self.db.clone(),
             cfg,
@@ -284,6 +294,17 @@ impl AcpManager {
 
     pub fn send_prompt(&self, instance_id: &str, text: String, files: Vec<String>) -> Result<(), String> {
         self.send(instance_id, AcpCommand::Prompt { text, files })
+    }
+
+    /// Cancel the in-flight prompt turn on an instance (out-of-band signal).
+    pub fn cancel(&self, instance_id: &str) -> Result<(), String> {
+        let tx = self
+            .instances
+            .lock()
+            .ok()
+            .and_then(|insts| insts.iter().find(|i| i.instance_id == instance_id).and_then(|i| i.cancel_tx.clone()))
+            .ok_or_else(|| format!("instance {instance_id} is not running"))?;
+        tx.send(()).map_err(|_| format!("instance {instance_id} is not running"))
     }
     pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
         self.send(instance_id, AcpCommand::NewSession)

@@ -213,6 +213,15 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **捲軸樣式**：`#chat-messages`/`#history-view`/`#file-picker`/`.tool-out` 改細的圓角藥丸 thumb、軌道透明、hover 變亮（取代預設灰條）。
 - **編譯**：`cargo check` + `tsc --noEmit` 通過；dev server 實測中。
 
+## ACP 內建功能批次（高價值四項）✅ 完成（實測中）
+
+盤點 ACP 還沒用到的內建能力，先做四項高價值的：
+- **Stop 鈕（`session/cancel`）**：agent 忙碌時送出鈕變紅 ■，按下送 `CancelNotification` 中止當回合。後端關鍵：主指令迴圈被 `block_task().await` 卡住，故用**獨立 cancel 通道**（`Instance.cancel_tx` + `AcpManager::cancel` + `cancel_prompt` command）+ Prompt arm 內 `tokio::select!`（需 tokio `macros` feature）邊跑邊聽 cancel；送 cancel 前先 drain 掉閒置時的殘留訊號。`conn`（`ConnectionTo<Agent>`）clone 安全。
+- **`/` 指令選單**：`chat_event` 轉發 `available_commands_update`→`{kind:"commands"}`；前端把 `@`/`/` 統一成一個 completion picker（`activeTrigger()`、`PickItem{insert,label,hint,file}`），`/` 只在訊息開頭觸發、選中插入 `/name`。
+- **工具 chip 變豐富**：`chat_event` 的 tool_call/tool_update 加 `tool_kind`、`locations`、`diff`（從 content 取 `{path,old,new}`）。前端 chip = icon(依 kind)+name+badge、`.tool-loc` 路徑列、點開展開 `.tool-diff`（紅減綠增，各截 40 行）或 `.tool-out` 文字。
+- **Plan 清單**：`plan` 事件帶 `entries`；前端 `renderPlan` 就地更新 `.plan`（⬜/⏳/✅），`Pet.currentPlan` 每回合重置。
+- **編譯**：`cargo check`（含 tokio macros）+ `tsc` 通過；dev 實測中。註：diff/plan 是否顯示取決於 adapter 是否送對應 update（指令清單確定有）。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。

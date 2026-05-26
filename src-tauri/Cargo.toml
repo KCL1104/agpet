@@ -29,7 +29,7 @@ serde_json = "1"
 # whole client as one future, so no direct tokio/tokio-util needed — we drive it
 # on Tauri's runtime via tauri::async_runtime::spawn.
 agent-client-protocol = { version = "=0.12.1", features = ["unstable_session_model"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "macros"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

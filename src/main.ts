@@ -41,6 +41,7 @@ interface Pet {
   container: HTMLDivElement;
   currentAgent: HTMLDivElement | null;
   currentThinking: HTMLDivElement | null;
+  currentPlan: HTMLDivElement | null;
   toolChips: Map<string, HTMLDivElement>;
   cfg: any; // agent-config: auth_methods / models / modes
 }
@@ -70,6 +71,7 @@ const messagesHost = document.getElementById("chat-messages") as HTMLDivElement;
 const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
 const filePicker = document.getElementById("file-picker") as HTMLDivElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
+const stopBtn = document.getElementById("chat-stop") as HTMLButtonElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
 const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
@@ -480,6 +482,8 @@ function selectAgent(id: string) {
     applyTheme(p.color);
     updateStatusBar(p);
   }
+  updateInputControls();
+  hidePicker();
   updateEmpty();
   scrollToBottom();
 }
@@ -496,9 +500,11 @@ function closePanel() {
   updatePanelOpen();
 }
 
-// --- @ file-mention picker ------------------------------------------------
+// --- Completion picker (@ files, / commands) ------------------------------
+interface PickItem { insert: string; label: string; hint?: string; file?: string }
 const fileCache = new Map<string, string[]>(); // instance_id -> cwd file list
-let picker: { items: string[]; sel: number; tokenStart: number } | null = null;
+const cmdsByInstance = new Map<string, { name: string; description: string }[]>();
+let picker: { items: PickItem[]; sel: number; tokenStart: number } | null = null;
 const mentionedFiles = new Set<string>();
 
 async function ensureFiles(instanceId: string): Promise<string[]> {
@@ -514,17 +520,19 @@ async function ensureFiles(instanceId: string): Promise<string[]> {
   }
 }
 
-// The @-token being typed: from the last "@" back to the cursor with no
-// whitespace in between. null when the cursor isn't inside a mention.
-function activeMention(): { query: string; start: number } | null {
+// Active completion trigger: an "@" mention anywhere (no whitespace after), or a
+// "/" command when the whole message starts with "/".
+function activeTrigger(): { trigger: "@" | "/"; query: string; start: number } | null {
   const pos = inputEl.selectionStart ?? inputEl.value.length;
   const upto = inputEl.value.slice(0, pos);
   const at = upto.lastIndexOf("@");
-  if (at < 0) return null;
-  if (at > 0 && !/\s/.test(upto[at - 1])) return null; // must be a standalone @
-  const query = upto.slice(at + 1);
-  if (/\s/.test(query)) return null; // mention ends at whitespace
-  return { query, start: at };
+  if (at >= 0 && (at === 0 || /\s/.test(upto[at - 1])) && !/\s/.test(upto.slice(at + 1))) {
+    return { trigger: "@", query: upto.slice(at + 1), start: at };
+  }
+  if (upto.startsWith("/") && !/\s/.test(upto.slice(1))) {
+    return { trigger: "/", query: upto.slice(1), start: 0 };
+  }
+  return null;
 }
 
 function scoreFile(path: string, q: string): number {
@@ -540,17 +548,24 @@ function scoreFile(path: string, q: string): number {
 function renderPicker() {
   if (!picker) return;
   filePicker.innerHTML = "";
-  picker.items.forEach((f, i) => {
+  picker.items.forEach((it, i) => {
     const row = document.createElement("div");
     row.className = "fp-row" + (i === picker!.sel ? " sel" : "");
-    row.textContent = f;
+    const label = document.createElement("span");
+    label.textContent = it.label;
+    row.appendChild(label);
+    if (it.hint) {
+      const h = document.createElement("span");
+      h.className = "fp-hint";
+      h.textContent = it.hint;
+      row.appendChild(h);
+    }
     // mousedown (not click) so the textarea keeps focus/selection for insertion
-    row.addEventListener("mousedown", (e) => { e.preventDefault(); selectFile(i); });
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); selectItem(i); });
     filePicker.appendChild(row);
   });
   filePicker.classList.remove("hidden");
-  const selRow = filePicker.children[picker.sel] as HTMLElement | undefined;
-  selRow?.scrollIntoView({ block: "nearest" });
+  (filePicker.children[picker.sel] as HTMLElement | undefined)?.scrollIntoView({ block: "nearest" });
 }
 
 function hidePicker() {
@@ -561,32 +576,41 @@ function hidePicker() {
 
 async function refreshPicker() {
   const pet = selectedPet();
-  const m = pet ? activeMention() : null;
-  if (!pet || !m) { hidePicker(); return; }
-  const files = await ensureFiles(pet.id);
-  const m2 = activeMention(); // re-validate: the mention may have changed while awaiting
-  if (!m2 || m2.start !== m.start) return;
-  const q = m2.query.toLowerCase();
-  const items = files
-    .filter((f) => f.toLowerCase().includes(q))
-    .sort((a, b) => scoreFile(b, q) - scoreFile(a, q))
-    .slice(0, 12);
+  const t = pet ? activeTrigger() : null;
+  if (!pet || !t) { hidePicker(); return; }
+  let items: PickItem[] = [];
+  if (t.trigger === "@") {
+    const files = await ensureFiles(pet.id);
+    const t2 = activeTrigger(); // re-validate after await
+    if (!t2 || t2.trigger !== "@" || t2.start !== t.start) return;
+    const q = t2.query.toLowerCase();
+    items = files
+      .filter((f) => f.toLowerCase().includes(q))
+      .sort((a, b) => scoreFile(b, q) - scoreFile(a, q))
+      .slice(0, 12)
+      .map((f) => ({ insert: "@" + f + " ", label: f, file: f }));
+  } else {
+    const q = t.query.toLowerCase();
+    items = (cmdsByInstance.get(pet.id) ?? [])
+      .filter((c) => c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q))
+      .slice(0, 12)
+      .map((c) => ({ insert: "/" + c.name + " ", label: "/" + c.name, hint: c.description }));
+  }
   if (items.length === 0) { hidePicker(); return; }
-  picker = { items, sel: 0, tokenStart: m2.start };
+  picker = { items, sel: 0, tokenStart: t.start };
   renderPicker();
 }
 
-function selectFile(i: number) {
+function selectItem(i: number) {
   if (!picker) return;
-  const path = picker.items[i];
+  const it = picker.items[i];
   const pos = inputEl.selectionStart ?? inputEl.value.length;
   const before = inputEl.value.slice(0, picker.tokenStart);
   const after = inputEl.value.slice(pos);
-  const insert = "@" + path + " ";
-  inputEl.value = before + insert + after;
-  const caret = before.length + insert.length;
+  inputEl.value = before + it.insert + after;
+  const caret = before.length + it.insert.length;
   inputEl.setSelectionRange(caret, caret);
-  mentionedFiles.add(path);
+  if (it.file) mentionedFiles.add(it.file);
   hidePicker();
   inputEl.focus();
 }
@@ -599,12 +623,26 @@ function sendPrompt() {
   const files = [...mentionedFiles].filter((f) => text.includes("@" + f));
   addMsgTo(pet, "user", text);
   resetTurn(pet);
+  pet.currentPlan = null; // a new turn gets a fresh plan block
   invoke("send_prompt", { instance: pet.id, text, files }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
   mentionedFiles.clear();
   hidePicker();
 }
 
+// Swap Send ⇄ Stop based on whether the selected pet is mid-turn.
+const BUSY_STATES = ["thinking", "responding", "tool_running", "permission"];
+function updateInputControls() {
+  const pet = selectedPet();
+  const busy = !!pet && BUSY_STATES.includes(pet.state);
+  sendBtn.style.display = busy ? "none" : "grid";
+  stopBtn.style.display = busy ? "grid" : "none";
+}
+
+stopBtn.addEventListener("click", () => {
+  const pet = selectedPet();
+  if (pet) invoke("cancel_prompt", { instance: pet.id }).catch(() => {});
+});
 sendBtn.addEventListener("click", sendPrompt);
 closeBtn.addEventListener("click", () => { hidePicker(); closePanel(); });
 inputEl.addEventListener("input", () => { void refreshPicker(); });
@@ -613,7 +651,7 @@ inputEl.addEventListener("keydown", (e) => {
   if (picker) {
     if (e.key === "ArrowDown") { e.preventDefault(); picker.sel = (picker.sel + 1) % picker.items.length; renderPicker(); return; }
     if (e.key === "ArrowUp") { e.preventDefault(); picker.sel = (picker.sel - 1 + picker.items.length) % picker.items.length; renderPicker(); return; }
-    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectFile(picker.sel); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectItem(picker.sel); return; }
     if (e.key === "Escape") { e.preventDefault(); hidePicker(); return; }
   }
   if (e.key === "Enter" && !e.shiftKey) {
@@ -683,8 +721,9 @@ async function loadHistory() {
 }
 
 function clearTranscript(pet: Pet) {
-  pet.container.querySelectorAll(".msg, .tool").forEach((n) => n.remove());
+  pet.container.querySelectorAll(".msg, .tool, .plan").forEach((n) => n.remove());
   resetTurn(pet);
+  pet.currentPlan = null;
   pet.toolChips.clear();
   if (pet.id === selected) {
     permBar.classList.add("hidden");
@@ -721,6 +760,7 @@ function addPet(info: InstanceInfo) {
     container,
     currentAgent: null,
     currentThinking: null,
+    currentPlan: null,
     toolChips: new Map(),
     cfg: null,
   };
@@ -769,6 +809,7 @@ listen<PetStatePayload>("pet-state", (event) => {
   if (pet.id === selected) {
     refreshHeader();
     updateStatusBar(pet);
+    updateInputControls();
   }
 });
 
@@ -790,6 +831,56 @@ interface ChatEvent {
   title?: string | null;
   status?: string | null;
   result?: string | null;
+  tool_kind?: string | null;
+  locations?: string[];
+  diff?: { path?: string | null; old?: string | null; new?: string | null } | null;
+  entries?: { content: string; status: string; priority?: string }[] | null;
+  commands?: { name: string; description: string }[] | null;
+}
+
+function toolIcon(kind?: string | null): string {
+  switch (kind) {
+    case "read": return "📖";
+    case "edit": return "✏️";
+    case "delete": return "🗑️";
+    case "move": return "📦";
+    case "search": return "🔍";
+    case "execute": return "⚡";
+    case "fetch": return "🌐";
+    case "think": return "💭";
+    case "switch_mode": return "🔀";
+    default: return "🔧";
+  }
+}
+
+// Naive line diff: removed (old) lines then added (new) lines, each capped.
+function renderDiff(el: HTMLElement, diff: { old?: string | null; new?: string | null }) {
+  el.innerHTML = "";
+  if (diff.old) {
+    for (const l of diff.old.split("\n").slice(0, 40)) {
+      const s = document.createElement("span"); s.className = "del"; s.textContent = "- " + l; el.appendChild(s);
+    }
+  }
+  for (const l of (diff.new ?? "").split("\n").slice(0, 40)) {
+    const s = document.createElement("span"); s.className = "add"; s.textContent = "+ " + l; el.appendChild(s);
+  }
+}
+
+const PLAN_ICON: Record<string, string> = { pending: "⬜", in_progress: "⏳", completed: "✅" };
+function renderPlan(pet: Pet, entries: { content: string; status: string }[]) {
+  if (!pet.currentPlan) {
+    pet.currentPlan = document.createElement("div");
+    pet.currentPlan.className = "plan";
+    pet.container.appendChild(pet.currentPlan);
+  }
+  pet.currentPlan.innerHTML = `<div class="plan-title">Plan</div>`;
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "plan-row" + (e.status === "completed" ? " done" : e.status === "in_progress" ? " active" : "");
+    row.textContent = `${PLAN_ICON[e.status] ?? "⬜"} ${e.content}`;
+    pet.currentPlan.appendChild(row);
+  }
+  if (pet.id === selected) scrollToBottom();
 }
 
 listen<ChatEvent>("chat-event", (event) => {
@@ -820,20 +911,30 @@ listen<ChatEvent>("chat-event", (event) => {
       if (!chip) {
         chip = document.createElement("div");
         chip.className = "tool";
-        // .tool-head (clickable) shows name + status; .tool-out holds the
-        // tool's result and is toggled by clicking the head.
+        // head (clickable) = icon + name + status; optional locations line; a
+        // collapsible diff or text-output detail toggled by clicking the head.
         chip.innerHTML =
-          `<div class="tool-head">🔧 <span class="name"></span> <span class="badge"></span></div>` +
+          `<div class="tool-head"><span class="ticon"></span> <span class="name"></span> <span class="badge"></span></div>` +
+          `<div class="tool-loc hidden"></div>` +
+          `<div class="tool-diff hidden"></div>` +
           `<pre class="tool-out hidden"></pre>`;
         chip.querySelector(".tool-head")!.addEventListener("click", () => {
+          const diff = chip!.querySelector(".tool-diff") as HTMLElement;
           const out = chip!.querySelector(".tool-out") as HTMLElement;
-          if (out.textContent) out.classList.toggle("hidden");
+          if (diff.childElementCount) diff.classList.toggle("hidden");
+          else if (out.textContent) out.classList.toggle("hidden");
         });
         pet.container.appendChild(chip);
         pet.toolChips.set(id, chip);
       }
+      (chip.querySelector(".ticon") as HTMLElement).textContent = toolIcon(ev.tool_kind);
       chip.querySelector(".name")!.textContent = ev.title ?? "tool";
       chip.querySelector(".badge")!.textContent = ev.status ?? "running";
+      if (ev.locations && ev.locations.length) {
+        const loc = chip.querySelector(".tool-loc") as HTMLElement;
+        loc.textContent = ev.locations.join("  ·  ");
+        loc.classList.remove("hidden");
+      }
       if (pet.id === selected) {
         updateEmpty();
         scrollToBottom();
@@ -849,13 +950,33 @@ listen<ChatEvent>("chat-event", (event) => {
         chip.classList.toggle("failed", status === "failed");
         const badge = chip.querySelector(".badge");
         if (badge) badge.textContent = status;
-        if (ev.result) {
-          const out = chip.querySelector(".tool-out") as HTMLElement;
-          out.textContent = ev.result.slice(0, 4000); // cap big Read/Bash output
+        if (ev.tool_kind) (chip.querySelector(".ticon") as HTMLElement).textContent = toolIcon(ev.tool_kind);
+        if (ev.diff && (ev.diff.new || ev.diff.old)) {
+          renderDiff(chip.querySelector(".tool-diff") as HTMLElement, ev.diff);
+          chip.classList.add("has-out");
+        } else if (ev.result) {
+          (chip.querySelector(".tool-out") as HTMLElement).textContent = ev.result.slice(0, 4000);
           chip.classList.add("has-out"); // shows the ▸ expand affordance
+        }
+        if (ev.locations && ev.locations.length) {
+          const loc = chip.querySelector(".tool-loc") as HTMLElement;
+          loc.textContent = ev.locations.join("  ·  ");
+          loc.classList.remove("hidden");
         }
         if (pet.id === selected) scrollToBottom();
       }
+      break;
+    }
+    case "plan": {
+      if (ev.entries && ev.entries.length) {
+        resetTurn(pet);
+        renderPlan(pet, ev.entries);
+        if (pet.id === selected) updateEmpty();
+      }
+      break;
+    }
+    case "commands": {
+      if (ev.commands) cmdsByInstance.set(ev.instance_id, ev.commands);
       break;
     }
   }
