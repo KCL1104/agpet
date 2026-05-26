@@ -6,67 +6,58 @@ use std::sync::atomic::Ordering;
 
 use tauri::{Manager, PhysicalPosition, PhysicalSize};
 
-use overlay::{OverlayState, PetRect};
+use overlay::{OverlayState, PetRectInput};
 
-/// Current ACP connection status, for the frontend / debugging.
+/// Agents to render as pets (id / name / colour).
 #[tauri::command]
-fn acp_status(state: tauri::State<'_, acp::AcpManager>) -> acp::AcpStatus {
-    state.status()
+fn list_agents(state: tauri::State<'_, acp::AcpManager>) -> Vec<acp::AgentInfo> {
+    state.list_agents()
 }
 
-/// Send a user prompt to the live ACP session.
+/// Send a user prompt to a specific agent's live session.
 #[tauri::command]
-fn send_prompt(text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.send_prompt(text)
+fn send_prompt(agent: String, text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.send_prompt(&agent, text)
 }
 
-/// Resolve a pending permission request with the user's chosen option id.
+/// Resolve a pending permission request for an agent.
 #[tauri::command]
-fn respond_permission(id: String, choice: String, state: tauri::State<'_, acp::AcpManager>) {
-    state.respond_permission(id, choice);
+fn respond_permission(agent: String, id: String, choice: String, state: tauri::State<'_, acp::AcpManager>) {
+    state.respond_permission(&agent, id, choice);
 }
 
-/// Frontend reports the pet's bounding box (CSS px) so the backend can hit-test
-/// the cursor against it for click-through toggling.
+/// End + summarize an agent's current session and open a fresh one.
 #[tauri::command]
-fn update_pet_rect(x: f64, y: f64, w: f64, h: f64, state: tauri::State<'_, OverlayState>) {
-    if let Ok(mut r) = state.pet_rect.lock() {
-        *r = PetRect {
-            x,
-            y,
-            w,
-            h,
-            valid: true,
-        };
-    }
+fn new_session(agent: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.new_session(&agent)
 }
 
-/// Frontend tells the backend whether the chat panel is open (forces the window
-/// interactive while open).
+/// Open a fresh session for an agent, seeded with a past session's summary.
 #[tauri::command]
-fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
-    state.panel_open.store(open, Ordering::Relaxed);
+fn resume_session(agent: String, id: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.resume_session(&agent, id)
 }
 
-/// End + summarize the current session and open a fresh one.
-#[tauri::command]
-fn new_session(state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.new_session()
-}
-
-/// Open a fresh session seeded with a past session's summary (by DB id).
-#[tauri::command]
-fn resume_session(id: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.resume_session(id)
-}
-
-/// List recent persisted sessions for the history panel.
+/// List recent persisted sessions for one agent.
 #[tauri::command]
 async fn list_sessions(
+    agent: String,
     state: tauri::State<'_, acp::AcpManager>,
 ) -> Result<Vec<db::SessionRow>, String> {
     let db = state.db_handle();
-    db.list_sessions(50).await.map_err(|e| e.to_string())
+    db.list_sessions(&agent, 50).await.map_err(|e| e.to_string())
+}
+
+/// Frontend reports every pet's bounding box (CSS px) for click-through hit-testing.
+#[tauri::command]
+fn update_pet_rects(rects: Vec<PetRectInput>, state: tauri::State<'_, OverlayState>) {
+    state.set_rects(rects);
+}
+
+/// Frontend tells the backend whether the chat panel is open.
+#[tauri::command]
+fn set_panel_open(open: bool, state: tauri::State<'_, OverlayState>) {
+    state.panel_open.store(open, Ordering::Relaxed);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -74,22 +65,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            acp_status,
+            list_agents,
             send_prompt,
             respond_permission,
-            update_pet_rect,
-            set_panel_open,
             new_session,
             resume_session,
-            list_sessions
+            list_sessions,
+            update_pet_rects,
+            set_panel_open
         ])
         .setup(|app| {
             let window = app
                 .get_webview_window("main")
                 .expect("main window should exist");
 
-            // Stretch the transparent window to cover the primary monitor so the
-            // pet can roam the whole desktop as an overlay.
+            // Stretch the transparent window to cover the primary monitor.
             if let Ok(Some(monitor)) = window.primary_monitor() {
                 let pos = monitor.position();
                 let size = monitor.size();
@@ -97,36 +87,26 @@ pub fn run() {
                 let _ = window.set_size(PhysicalSize::new(size.width, size.height));
             }
 
-            // Start fully click-through; the overlay loop toggles this on/off as
-            // the cursor enters/leaves the pet (M1 step 4).
+            // Start fully click-through; the overlay loop toggles per pet.
             let _ = window.set_ignore_cursor_events(true);
-
-            // Overlay click-through: manage shared state, then poll the cursor.
             app.manage(OverlayState::new());
             overlay::spawn_clickthrough_loop(app.handle().clone());
 
-            // ACP client + persistence: open the SQLite DB, then spawn
-            // claude-code-acp, run the handshake, stream session/update -> pet
-            // states + chat events, accept prompts, and persist sessions.
-            // Failures are logged and degrade gracefully (no crash).
+            // Open the session DB, load agents, and spawn one ACP client per agent.
             acp::logging::init();
-            match app.path().app_data_dir() {
-                Ok(dir) => {
-                    let db_path = dir.join("agpet.db");
-                    match tauri::async_runtime::block_on(db::Db::init(&db_path)) {
-                        Ok(database) => {
-                            let manager = acp::AcpManager::new(std::sync::Arc::new(database));
-                            match acp::AcpConfig::default_for(app.handle()) {
-                                Ok(config) => manager.start(app.handle().clone(), config),
-                                Err(e) => tracing::error!("ACP config error, adapter not started: {e:#}"),
-                            }
-                            app.manage(manager);
-                            tracing::info!("session DB: {}", db_path.display());
-                        }
-                        Err(e) => tracing::error!("DB init failed, ACP disabled: {e:#}"),
-                    }
-                }
-                Err(e) => tracing::error!("app_data_dir failed, ACP disabled: {e}"),
+            let setup: anyhow::Result<()> = (|| {
+                let db_path = app.path().app_data_dir()?.join("agpet.db");
+                let database = tauri::async_runtime::block_on(db::Db::init(&db_path))?;
+                tracing::info!("session DB: {}", db_path.display());
+                let config = acp::AgentsConfig::load(app.handle())?;
+                tracing::info!("loaded {} agent(s)", config.agents.len());
+                let manager = acp::AcpManager::new(std::sync::Arc::new(database), &config);
+                manager.start_all(app.handle().clone());
+                app.manage(manager);
+                Ok(())
+            })();
+            if let Err(e) = setup {
+                tracing::error!("ACP setup failed, agents disabled: {e:#}");
             }
 
             Ok(())

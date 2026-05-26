@@ -155,12 +155,13 @@ impl Db {
         Ok(())
     }
 
-    /// Most recent sessions first (for the history panel).
-    pub async fn list_sessions(&self, limit: i64) -> anyhow::Result<Vec<SessionRow>> {
+    /// Most recent sessions for one agent (for its history panel).
+    pub async fn list_sessions(&self, agent_id: &str, limit: i64) -> anyhow::Result<Vec<SessionRow>> {
         let rows = sqlx::query_as::<_, SessionRow>(
             "SELECT id, agent_id, started_at, ended_at, status, workdir, initial_prompt, summary, parent_session_id
-             FROM sessions ORDER BY started_at DESC LIMIT ?",
+             FROM sessions WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?",
         )
+        .bind(agent_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await

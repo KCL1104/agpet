@@ -1,38 +1,56 @@
-//! Dynamic click-through for the transparent overlay.
+//! Dynamic click-through for the transparent overlay (multi-pet).
 //!
-//! While click-through is on, the webview receives no mouse events, so it can't
-//! tell when the cursor enters the pet. We instead poll the global cursor from
-//! the backend and toggle `set_ignore_cursor_events`: the window is interactive
-//! only while the cursor is over the pet (reported by the frontend each frame)
-//! or the chat panel is open; otherwise clicks pass through to the desktop.
+//! While click-through is on, the webview gets no mouse events, so the backend
+//! polls the global cursor and toggles `set_ignore_cursor_events`: the window is
+//! interactive only while the cursor is over *some* pet (rects reported by the
+//! frontend) or the chat panel is open; otherwise clicks pass through.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-/// Pet bounding box in CSS pixels relative to the window, reported by the frontend.
-#[derive(Default, Clone, Copy)]
+/// A pet bounding box in CSS pixels relative to the window.
+#[derive(Clone, Copy)]
 pub struct PetRect {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
-    pub valid: bool,
 }
 
-/// Tauri-managed overlay state shared between commands and the poll loop.
+/// Frontend payload for reporting a pet rect (with its agent id).
+#[derive(Deserialize)]
+pub struct PetRectInput {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 pub struct OverlayState {
-    pub pet_rect: Mutex<PetRect>,
+    pub pet_rects: Mutex<HashMap<String, PetRect>>,
     pub panel_open: AtomicBool,
 }
 
 impl OverlayState {
     pub fn new() -> Self {
         Self {
-            pet_rect: Mutex::new(PetRect::default()),
+            pet_rects: Mutex::new(HashMap::new()),
             panel_open: AtomicBool::new(false),
+        }
+    }
+
+    pub fn set_rects(&self, rects: Vec<PetRectInput>) {
+        if let Ok(mut map) = self.pet_rects.lock() {
+            map.clear();
+            for r in rects {
+                map.insert(r.id, PetRect { x: r.x, y: r.y, w: r.w, h: r.h });
+            }
         }
     }
 }
@@ -43,24 +61,19 @@ impl Default for OverlayState {
     }
 }
 
-/// Poll the cursor ~30x/sec and toggle click-through accordingly.
 pub fn spawn_clickthrough_loop(app: AppHandle) {
     std::thread::spawn(move || {
         let Some(window) = app.get_webview_window("main") else {
             tracing::error!("clickthrough loop: main window missing");
             return;
         };
-        // Matches the initial `set_ignore_cursor_events(true)` in setup.
         let mut current_ignore = true;
-
         loop {
             std::thread::sleep(Duration::from_millis(33));
-
             let state = app.state::<OverlayState>();
             let panel_open = state.panel_open.load(Ordering::Relaxed);
-            let over_pet = !panel_open && cursor_over_pet(&window, &state);
+            let over_pet = !panel_open && cursor_over_any_pet(&window, &state);
             let desired_ignore = !(panel_open || over_pet);
-
             if desired_ignore != current_ignore {
                 match window.set_ignore_cursor_events(desired_ignore) {
                     Ok(()) => current_ignore = desired_ignore,
@@ -71,15 +84,7 @@ pub fn spawn_clickthrough_loop(app: AppHandle) {
     });
 }
 
-/// True if the global cursor is within the pet's (padded) screen rect.
-fn cursor_over_pet(window: &WebviewWindow, state: &OverlayState) -> bool {
-    let rect = match state.pet_rect.lock() {
-        Ok(g) => *g,
-        Err(_) => return false,
-    };
-    if !rect.valid {
-        return false;
-    }
+fn cursor_over_any_pet(window: &WebviewWindow, state: &OverlayState) -> bool {
     let (Ok(cursor), Ok(origin), Ok(scale)) = (
         window.cursor_position(),
         window.outer_position(),
@@ -87,13 +92,16 @@ fn cursor_over_pet(window: &WebviewWindow, state: &OverlayState) -> bool {
     ) else {
         return false;
     };
-
-    // Pet rect is CSS px relative to the window; convert to global physical px.
-    let pad = 10.0 * scale; // easier to hover
-    let left = origin.x as f64 + rect.x * scale - pad;
-    let top = origin.y as f64 + rect.y * scale - pad;
-    let right = left + rect.w * scale + pad * 2.0;
-    let bottom = top + rect.h * scale + pad * 2.0;
-
-    cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom
+    let Ok(map) = state.pet_rects.lock() else { return false };
+    let pad = 10.0 * scale;
+    for r in map.values() {
+        let left = origin.x as f64 + r.x * scale - pad;
+        let top = origin.y as f64 + r.y * scale - pad;
+        let right = left + r.w * scale + pad * 2.0;
+        let bottom = top + r.h * scale + pad * 2.0;
+        if cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom {
+            return true;
+        }
+    }
+    false
 }

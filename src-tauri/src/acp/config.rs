@@ -1,72 +1,137 @@
-//! Configuration for spawning the ACP adapter.
+//! Multi-agent configuration (Milestone 3).
 //!
-//! Nothing about the agent command is hard-coded deeper in the stack — the
-//! command, args, working directory and log path all live here so they can be
-//! made user-configurable later (spec: "All paths configurable, never hard-coded").
+//! Agents are declared in a user-editable `agents.toml` under the app config
+//! dir. Nothing about an agent's launch command is hard-coded deeper in the
+//! stack. We deliberately do **not** inject `ANTHROPIC_API_KEY` / provider keys
+//! — each adapter reuses its own CLI's login (e.g. `claude /login`).
 
 use std::path::PathBuf;
 
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-/// How to spawn the ACP adapter, where it runs, and where to log its messages.
-#[derive(Debug, Clone)]
-pub struct AcpConfig {
-    /// Program to execute (e.g. `cmd` on Windows, `npx` elsewhere).
+/// One declared agent (a pet) and how to launch its ACP adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDef {
+    pub id: String,
+    pub name: String,
+    /// Program to run (logical, e.g. `npx` or `opencode`). On Windows it is
+    /// invoked via `cmd /c` so `.cmd` shims (npx, npm-installed bins) work.
     pub command: String,
-    /// Arguments following the program.
+    #[serde(default)]
     pub args: Vec<String>,
-    /// Working directory passed to `session/new` (must be absolute).
-    pub cwd: PathBuf,
-    /// JSONL file that every JSON-RPC line (both directions) is appended to.
-    pub message_log_path: PathBuf,
+    /// Pet body colour (hex).
+    #[serde(default = "default_color")]
+    pub color: String,
 }
 
-impl AcpConfig {
-    /// Default config: spawn `@zed-industries/claude-code-acp` via npx.
-    ///
-    /// On Windows `npx` is a `.cmd` batch script that `CreateProcess` cannot run
-    /// directly, so we go through `cmd /c`. We deliberately do **not** set
-    /// `ANTHROPIC_API_KEY`: the adapter reuses the existing Claude Code login
-    /// (run `claude /login` once). If a key were set it would override the
-    /// subscription, so we leave the environment untouched.
-    pub fn default_for(app: &AppHandle) -> anyhow::Result<Self> {
-        let (command, args) = if cfg!(windows) {
-            (
-                "cmd".to_string(),
-                vec![
-                    "/c".into(),
-                    "npx".into(),
-                    "-y".into(),
-                    "@zed-industries/claude-code-acp@latest".into(),
-                ],
-            )
-        } else {
-            (
-                "npx".to_string(),
-                vec!["-y".into(), "@zed-industries/claude-code-acp@latest".into()],
-            )
-        };
+fn default_color() -> String {
+    "#e8743b".to_string()
+}
 
-        let cwd = std::env::current_dir().context("resolve current dir for session cwd")?;
-
-        let log_dir = app.path().app_log_dir().context("resolve app log dir")?;
-        std::fs::create_dir_all(&log_dir).context("create app log dir")?;
-        let message_log_path = log_dir.join("acp-messages.jsonl");
-
-        Ok(Self {
-            command,
-            args,
-            cwd,
-            message_log_path,
-        })
-    }
-
-    /// Full argv (program + args) for [`agent_client_protocol::AcpAgent::from_args`].
+impl AgentDef {
+    /// Full argv for [`agent_client_protocol::AcpAgent::from_args`], wrapping in
+    /// `cmd /c` on Windows so `.cmd` shims resolve and run.
     pub fn argv(&self) -> Vec<String> {
-        let mut v = Vec::with_capacity(1 + self.args.len());
+        let mut v = Vec::with_capacity(self.args.len() + 3);
+        if cfg!(windows) {
+            v.push("cmd".to_string());
+            v.push("/c".to_string());
+        }
         v.push(self.command.clone());
         v.extend(self.args.iter().cloned());
         v
     }
 }
+
+#[derive(Debug, Deserialize)]
+struct AgentsFile {
+    #[serde(rename = "agent", default)]
+    agents: Vec<AgentDef>,
+}
+
+/// Loaded agent set plus shared runtime paths.
+pub struct AgentsConfig {
+    pub agents: Vec<AgentDef>,
+    pub cwd: PathBuf,
+    pub log_dir: PathBuf,
+}
+
+impl AgentsConfig {
+    /// Load `agents.toml` from the app config dir, writing defaults if missing.
+    pub fn load(app: &AppHandle) -> anyhow::Result<Self> {
+        let cfg_dir = app.path().app_config_dir().context("app config dir")?;
+        std::fs::create_dir_all(&cfg_dir).context("create config dir")?;
+        let path = cfg_dir.join("agents.toml");
+
+        let agents = if path.exists() {
+            let txt = std::fs::read_to_string(&path).context("read agents.toml")?;
+            let parsed: AgentsFile = toml::from_str(&txt).context("parse agents.toml")?;
+            parsed.agents
+        } else {
+            std::fs::write(&path, DEFAULT_AGENTS_TOML).context("write default agents.toml")?;
+            tracing::info!("wrote default agents.toml at {}", path.display());
+            default_agents()
+        };
+        let agents = if agents.is_empty() { default_agents() } else { agents };
+
+        let cwd = std::env::current_dir().context("current dir")?;
+        let log_dir = app.path().app_log_dir().context("app log dir")?;
+        std::fs::create_dir_all(&log_dir).context("create log dir")?;
+
+        Ok(Self { agents, cwd, log_dir })
+    }
+}
+
+fn default_agents() -> Vec<AgentDef> {
+    vec![
+        AgentDef {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@zed-industries/claude-code-acp".into()],
+            color: "#e8743b".into(),
+        },
+        AgentDef {
+            id: "codex".into(),
+            name: "Codex".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@zed-industries/codex-acp".into()],
+            color: "#10a37f".into(),
+        },
+        AgentDef {
+            id: "opencode".into(),
+            name: "OpenCode".into(),
+            command: "opencode".into(),
+            args: vec!["acp".into()],
+            color: "#7c5cff".into(),
+        },
+    ]
+}
+
+const DEFAULT_AGENTS_TOML: &str = r##"# agpet agents — one pet per agent. Edit freely; restart the app to apply.
+# `command` + `args` are run via `cmd /c` on Windows so npx/.cmd shims work.
+# Each agent uses its own CLI login (run e.g. `claude /login`, Codex/OpenCode auth).
+
+[[agent]]
+id = "claude"
+name = "Claude Code"
+command = "npx"
+args = ["-y", "@zed-industries/claude-code-acp"]
+color = "#e8743b"
+
+[[agent]]
+id = "codex"
+name = "Codex"
+command = "npx"
+args = ["-y", "@zed-industries/codex-acp"]
+color = "#10a37f"
+
+[[agent]]
+id = "opencode"
+name = "OpenCode"
+command = "opencode"
+args = ["acp"]
+color = "#7c5cff"
+"##;

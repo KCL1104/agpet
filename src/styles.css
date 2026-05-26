@@ -159,6 +159,12 @@ body {
   border-radius: 4px;
 }
 
+.agent-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .chat-empty {
   position: absolute;
   inset: 0;

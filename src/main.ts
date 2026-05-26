@@ -1,8 +1,9 @@
-// Milestone 1: a placeholder "pet" that walks along the bottom of the screen,
-// reflects the connected agent's ACP state (step 3), and — when clicked — opens
-// a chat panel to talk to the agent (step 4). The backend emits `pet-state`,
-// `chat-event`, and `permission-request` events; we render them here, and report
-// the pet's bounding box back so the backend can toggle click-through.
+// Milestone 3 (slice 1): one walking pet per agent (Claude / Codex / OpenCode).
+// Each pet reflects its agent's ACP state; clicking a pet opens that agent's own
+// chat panel. Per-agent transcripts are kept in separate DOM containers so
+// switching pets preserves each conversation. The backend tags every event with
+// `agent_id`; we route to the right pet/panel and report all pet rects so the
+// backend can toggle click-through.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,53 +11,61 @@ import { listen } from "@tauri-apps/api/event";
 const canvas = document.getElementById("pet-canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 
-const PET_W = 64; // body width (px)
-const PET_H = 64; // body height (px)
-const SPEED = 140; // walk speed (px/sec)
-const BOB_HZ = 3; // bob/step cycles per second
-const BOB_AMP = 6; // vertical bob amplitude (px)
-const MARGIN_BOTTOM = 28; // gap from the bottom edge (px)
+const PET_W = 64;
+const PET_H = 64;
+const SPEED = 120;
+const BOB_HZ = 3;
+const BOB_AMP = 6;
+const MARGIN_BOTTOM = 28;
 
-let x = 0; // body left, in CSS px
-let dir: 1 | -1 = 1; // 1 = walking right, -1 = walking left
-let baselineY = 0; // resting top of the body
+let baselineY = 0;
 let last = performance.now();
 
-// --- ACP-driven pet state -------------------------------------------------
+interface AgentInfo {
+  id: string;
+  name: string;
+  color: string;
+}
 
-interface PetStatePayload {
+interface Pet {
+  id: string;
+  name: string;
+  color: string;
+  x: number;
+  dir: 1 | -1;
   state: string;
-  detail?: string | null;
+  detail: string;
+  revertAt: number; // transient "completed" -> idle
+  container: HTMLDivElement; // per-agent transcript
+  currentAgent: HTMLDivElement | null;
+  currentThinking: HTMLDivElement | null;
+  toolChips: Map<string, HTMLDivElement>;
 }
 
-const STATE_STYLE: Record<
-  string,
-  { color: string; emote: string; walk: boolean; label: string }
-> = {
-  connecting:    { color: "#9aa0a6", emote: "…",  walk: false, label: "connecting" },
-  idle:          { color: "#e8743b", emote: "",   walk: true,  label: "idle" },
-  thinking:      { color: "#6c8cff", emote: "💭", walk: false, label: "thinking" },
-  tool_running:  { color: "#3fa45b", emote: "🔧", walk: false, label: "tool" },
-  permission:    { color: "#e7b53b", emote: "❓", walk: false, label: "permission" },
-  responding:    { color: "#e8743b", emote: "💬", walk: true,  label: "responding" },
-  completed:     { color: "#3fa45b", emote: "✓",  walk: true,  label: "done" },
-  auth_required: { color: "#e7b53b", emote: "🔑", walk: false, label: "login needed" },
-  error:         { color: "#c0392b", emote: "✕",  walk: false, label: "error" },
-  exited:        { color: "#7f8c8d", emote: "💤", walk: false, label: "exited" },
+const pets: Pet[] = [];
+const petById = new Map<string, Pet>();
+let selected: string | null = null;
+
+const STATE_META: Record<string, { emote: string; walk: boolean; label: string }> = {
+  connecting:    { emote: "…",  walk: false, label: "connecting" },
+  idle:          { emote: "",   walk: true,  label: "" },
+  thinking:      { emote: "💭", walk: false, label: "thinking" },
+  tool_running:  { emote: "🔧", walk: false, label: "tool" },
+  permission:    { emote: "❓", walk: false, label: "permission" },
+  responding:    { emote: "💬", walk: true,  label: "responding" },
+  completed:     { emote: "✓",  walk: true,  label: "done" },
+  auth_required: { emote: "🔑", walk: false, label: "login needed" },
+  error:         { emote: "✕",  walk: false, label: "error" },
+  exited:        { emote: "💤", walk: false, label: "offline" },
 };
-
-let petState = "connecting";
-let stateDetail = "";
-let revertToIdleAt = 0; // `completed` is transient → fall back to idle
-
-function style() {
-  return STATE_STYLE[petState] ?? STATE_STYLE.idle;
+function meta(state: string) {
+  return STATE_META[state] ?? STATE_META.idle;
 }
 
-// --- Chat panel -----------------------------------------------------------
+// --- DOM refs -------------------------------------------------------------
 
 const panel = document.getElementById("chat-panel") as HTMLDivElement;
-const messagesEl = document.getElementById("chat-messages") as HTMLDivElement;
+const messagesHost = document.getElementById("chat-messages") as HTMLDivElement;
 const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
@@ -67,38 +76,65 @@ const historyView = document.getElementById("history-view") as HTMLDivElement;
 const chatEmpty = document.getElementById("chat-empty") as HTMLDivElement;
 const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
 const statusText = document.getElementById("status-text") as HTMLSpanElement;
+const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
+const avatarEl = document.getElementById("pet-avatar") as HTMLSpanElement;
 
-// Show the friendly placeholder only when there are no messages/tool chips.
+function selectedPet(): Pet | undefined {
+  return selected ? petById.get(selected) : undefined;
+}
+
 function updateEmpty() {
-  const hasContent = messagesEl.querySelector(".msg, .tool");
-  chatEmpty.style.display = hasContent ? "none" : "flex";
+  const p = selectedPet();
+  const has = p && p.container.querySelector(".msg, .tool");
+  chatEmpty.style.display = has ? "none" : "flex";
 }
 
-// Streaming targets for the current agent turn.
-let currentAgent: HTMLDivElement | null = null;
-let currentThinking: HTMLDivElement | null = null;
-const toolChips = new Map<string, HTMLDivElement>();
-
-function scrollToBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-function addMessage(cls: string, text: string): HTMLDivElement {
+function addMsgTo(pet: Pet, cls: string, text: string): HTMLDivElement {
   const div = document.createElement("div");
   div.className = `msg ${cls}`;
   div.textContent = text;
-  messagesEl.appendChild(div);
-  updateEmpty();
-  scrollToBottom();
+  pet.container.appendChild(div);
+  if (pet.id === selected) {
+    updateEmpty();
+    scrollToBottom();
+  }
   return div;
 }
 
-function resetTurn() {
-  currentAgent = null;
-  currentThinking = null;
+function scrollToBottom() {
+  messagesHost.scrollTop = messagesHost.scrollHeight;
 }
 
-function openPanel() {
+function resetTurn(pet: Pet) {
+  pet.currentAgent = null;
+  pet.currentThinking = null;
+}
+
+function refreshHeader() {
+  const p = selectedPet();
+  if (!p) return;
+  titleEl.textContent = p.name;
+  avatarEl.style.background = p.color + "33";
+  avatarEl.style.boxShadow = `inset 0 0 0 1px ${p.color}`;
+  const m = meta(p.state);
+  statusDot.style.background = p.color;
+  statusText.textContent = m.label || "idle";
+}
+
+function selectAgent(id: string) {
+  selected = id;
+  for (const p of pets) {
+    p.container.style.display = p.id === id ? "flex" : "none";
+  }
+  historyView.classList.add("hidden");
+  permBar.classList.add("hidden");
+  refreshHeader();
+  updateEmpty();
+  scrollToBottom();
+}
+
+function openPanelFor(id: string) {
+  selectAgent(id);
   panel.classList.remove("hidden");
   invoke("set_panel_open", { open: true }).catch(() => {});
   inputEl.focus();
@@ -110,11 +146,12 @@ function closePanel() {
 }
 
 function sendPrompt() {
+  const pet = selectedPet();
   const text = inputEl.value.trim();
-  if (!text) return;
-  addMessage("user", text);
-  resetTurn();
-  invoke("send_prompt", { text }).catch((e) => addMessage("system", `send failed: ${e}`));
+  if (!pet || !text) return;
+  addMsgTo(pet, "user", text);
+  resetTurn(pet);
+  invoke("send_prompt", { agent: pet.id, text }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
 }
 
@@ -127,34 +164,39 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
-// --- Sessions: New / History / Resume (M2) --------------------------------
+newBtn.addEventListener("click", () => {
+  const pet = selectedPet();
+  if (!pet) return;
+  invoke("new_session", { agent: pet.id }).catch(() => {});
+  addMsgTo(pet, "system", "Summarizing & starting a new session…");
+});
+
+historyBtn.addEventListener("click", () => {
+  if (historyView.classList.contains("hidden")) {
+    loadHistory();
+    historyView.classList.remove("hidden");
+  } else {
+    historyView.classList.add("hidden");
+  }
+});
 
 interface SessionRow {
   id: string;
   started_at: number;
-  ended_at: number | null;
   status: string;
   initial_prompt: string | null;
   summary: string | null;
 }
 
-function clearTranscript() {
-  // Remove messages/tool chips but keep the empty-state node.
-  messagesEl.querySelectorAll(".msg, .tool").forEach((n) => n.remove());
-  permBar.classList.add("hidden");
-  permBar.innerHTML = "";
-  resetTurn();
-  toolChips.clear();
-  updateEmpty();
-}
-
 async function loadHistory() {
+  const pet = selectedPet();
+  if (!pet) return;
   historyView.innerHTML = `<div class="hist-empty">Loading…</div>`;
   try {
-    const rows = await invoke<SessionRow[]>("list_sessions");
+    const rows = await invoke<SessionRow[]>("list_sessions", { agent: pet.id });
     historyView.innerHTML = "";
     if (!rows || rows.length === 0) {
-      historyView.innerHTML = `<div class="hist-empty">No past sessions yet.</div>`;
+      historyView.innerHTML = `<div class="hist-empty">No past sessions for ${pet.name} yet.</div>`;
       return;
     }
     for (const r of rows) {
@@ -170,10 +212,10 @@ async function loadHistory() {
       row.querySelector(".hist-status")!.textContent = r.status;
       row.querySelector(".hist-summary")!.textContent = text;
       row.querySelector(".hist-resume")!.addEventListener("click", () => {
-        invoke("resume_session", { id: r.id }).catch(() => {});
+        invoke("resume_session", { agent: pet.id, id: r.id }).catch(() => {});
         historyView.classList.add("hidden");
-        clearTranscript();
-        addMessage("system", "Resuming previous session…");
+        clearTranscript(pet);
+        addMsgTo(pet, "system", "Resuming previous session…");
       });
       historyView.appendChild(row);
     }
@@ -182,102 +224,85 @@ async function loadHistory() {
   }
 }
 
-newBtn.addEventListener("click", () => {
-  invoke("new_session").catch(() => {});
-  addMessage("system", "Summarizing & starting a new session…");
-});
-
-historyBtn.addEventListener("click", () => {
-  if (historyView.classList.contains("hidden")) {
-    loadHistory();
-    historyView.classList.remove("hidden");
-  } else {
-    historyView.classList.add("hidden");
+function clearTranscript(pet: Pet) {
+  pet.container.querySelectorAll(".msg, .tool").forEach((n) => n.remove());
+  resetTurn(pet);
+  pet.toolChips.clear();
+  if (pet.id === selected) {
+    permBar.classList.add("hidden");
+    permBar.innerHTML = "";
+    updateEmpty();
   }
-});
-
-listen("session-reset", () => {
-  clearTranscript();
-  historyView.classList.add("hidden");
-});
-
-// The pet's clickable bounding box (CSS px), covering emote above + label below.
-function petBox() {
-  return { x: x - 8, y: baselineY - 40, w: PET_W + 16, h: PET_H + 90 };
 }
 
-canvas.addEventListener("click", (e) => {
-  const b = petBox();
-  if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
-    openPanel();
-  }
-});
+// --- Backend events (routed by agent_id) ----------------------------------
 
-// --- Backend events -------------------------------------------------------
+interface PetStatePayload { agent_id: string; state: string; detail?: string | null; }
 
 listen<PetStatePayload>("pet-state", (event) => {
-  petState = event.payload.state;
-  stateDetail = event.payload.detail ?? "";
-  if (petState === "completed") {
-    revertToIdleAt = performance.now() + 2200;
-    resetTurn();
+  const pet = petById.get(event.payload.agent_id);
+  if (!pet) return;
+  pet.state = event.payload.state;
+  pet.detail = event.payload.detail ?? "";
+  if (pet.state === "completed") {
+    pet.revertAt = performance.now() + 2200;
+    resetTurn(pet);
   }
-  // Reflect state in the panel header status dot.
-  const st = STATE_STYLE[petState] ?? STATE_STYLE.idle;
-  if (statusDot) statusDot.style.background = st.color;
-  if (statusText) statusText.textContent = stateDetail ? `${st.label} · ${stateDetail}` : st.label;
+  if (pet.id === selected) refreshHeader();
 });
 
 interface ChatEvent {
+  agent_id: string;
   kind: string;
   text?: string;
   tool_call_id?: string | null;
   title?: string | null;
   status?: string | null;
-  output?: string | null;
-  tool_kind?: string | null;
 }
 
 listen<ChatEvent>("chat-event", (event) => {
   const ev = event.payload;
+  const pet = petById.get(ev.agent_id);
+  if (!pet) return;
   switch (ev.kind) {
     case "agent_message": {
       if (!ev.text) break;
-      currentThinking = null;
-      if (!currentAgent) currentAgent = addMessage("agent", "");
-      currentAgent.textContent += ev.text;
-      scrollToBottom();
+      pet.currentThinking = null;
+      if (!pet.currentAgent) pet.currentAgent = addMsgTo(pet, "agent", "");
+      pet.currentAgent.textContent += ev.text;
+      if (pet.id === selected) scrollToBottom();
       break;
     }
     case "agent_thought": {
       if (!ev.text) break;
-      currentAgent = null;
-      if (!currentThinking) currentThinking = addMessage("thinking", "");
-      currentThinking.textContent += ev.text;
-      scrollToBottom();
+      pet.currentAgent = null;
+      if (!pet.currentThinking) pet.currentThinking = addMsgTo(pet, "thinking", "");
+      pet.currentThinking.textContent += ev.text;
+      if (pet.id === selected) scrollToBottom();
       break;
     }
     case "tool_call": {
-      resetTurn();
+      resetTurn(pet);
       const id = ev.tool_call_id ?? `${Date.now()}`;
-      const title = ev.title ?? "tool";
-      let chip = toolChips.get(id);
+      let chip = pet.toolChips.get(id);
       if (!chip) {
         chip = document.createElement("div");
         chip.className = "tool";
-        messagesEl.appendChild(chip);
-        toolChips.set(id, chip);
+        pet.container.appendChild(chip);
+        pet.toolChips.set(id, chip);
       }
       chip.innerHTML = `🔧 <span class="name"></span> <span class="badge"></span>`;
-      chip.querySelector(".name")!.textContent = title;
+      chip.querySelector(".name")!.textContent = ev.title ?? "tool";
       chip.querySelector(".badge")!.textContent = ev.status ?? "running";
-      updateEmpty();
-      scrollToBottom();
+      if (pet.id === selected) {
+        updateEmpty();
+        scrollToBottom();
+      }
       break;
     }
     case "tool_update": {
       const id = ev.tool_call_id ?? "";
-      const chip = toolChips.get(id);
+      const chip = pet.toolChips.get(id);
       if (chip) {
         const status = ev.status ?? "running";
         chip.classList.toggle("completed", status === "completed");
@@ -287,35 +312,23 @@ listen<ChatEvent>("chat-event", (event) => {
       }
       break;
     }
-    case "plan": {
-      currentThinking = null;
-      currentAgent = null;
-      addMessage("thinking", "📋 planning…");
-      break;
-    }
   }
 });
 
-interface PermissionOption {
-  optionId: string;
-  name: string;
-  kind: string;
-}
-interface PermissionRequest {
-  request_id: string;
-  title: string;
-  options: PermissionOption[];
-}
+interface PermissionOption { optionId: string; name: string; kind: string; }
+interface PermissionRequest { agent_id: string; request_id: string; title: string; options: PermissionOption[]; }
 
 listen<PermissionRequest>("permission-request", (event) => {
-  const { request_id, title, options } = event.payload;
-  if (panel.classList.contains("hidden")) openPanel();
+  const { agent_id, request_id, title, options } = event.payload;
+  const pet = petById.get(agent_id);
+  if (!pet) return;
+  openPanelFor(agent_id); // surface the request on its agent
 
   permBar.innerHTML = "";
-  const titleEl = document.createElement("div");
-  titleEl.className = "perm-title";
-  titleEl.textContent = `Allow: ${title}?`;
-  permBar.appendChild(titleEl);
+  const titleEl2 = document.createElement("div");
+  titleEl2.className = "perm-title";
+  titleEl2.textContent = `${pet.name} — allow: ${title}?`;
+  permBar.appendChild(titleEl2);
 
   const btnRow = document.createElement("div");
   btnRow.className = "perm-buttons";
@@ -325,7 +338,7 @@ listen<PermissionRequest>("permission-request", (event) => {
     if (opt.kind?.includes("allow")) btn.classList.add("allow");
     if (opt.kind?.includes("reject")) btn.classList.add("reject");
     btn.addEventListener("click", () => {
-      invoke("respond_permission", { id: request_id, choice: opt.optionId }).catch(() => {});
+      invoke("respond_permission", { agent: agent_id, id: request_id, choice: opt.optionId }).catch(() => {});
       permBar.classList.add("hidden");
       permBar.innerHTML = "";
     });
@@ -335,7 +348,12 @@ listen<PermissionRequest>("permission-request", (event) => {
   permBar.classList.remove("hidden");
 });
 
-// --- Rendering loop -------------------------------------------------------
+listen<{ agent_id: string }>("session-reset", (event) => {
+  const pet = petById.get(event.payload.agent_id);
+  if (pet) clearTranscript(pet);
+});
+
+// --- Rendering ------------------------------------------------------------
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
@@ -357,89 +375,23 @@ function roundRect(c: CanvasRenderingContext2D, rx: number, ry: number, rw: numb
   c.closePath();
 }
 
-let lastRectSent = 0;
-function reportRect(now: number) {
-  if (now - lastRectSent < 40) return;
-  lastRectSent = now;
-  const b = petBox();
-  invoke("update_pet_rect", { x: b.x, y: b.y, w: b.w, h: b.h }).catch(() => {});
+function petBox(pet: Pet) {
+  return { x: pet.x - 8, y: baselineY - 40, w: PET_W + 16, h: PET_H + 90 };
 }
 
-function draw(now: number) {
-  const dt = Math.min((now - last) / 1000, 0.05);
-  last = now;
-
-  if (petState === "completed" && now >= revertToIdleAt) {
-    petState = "idle";
-    stateDetail = "";
-  }
-
-  const s = style();
-  const w = window.innerWidth;
-
-  if (s.walk) {
-    x += dir * SPEED * dt;
-    if (x <= 0) {
-      x = 0;
-      dir = 1;
-    } else if (x + PET_W >= w) {
-      x = w - PET_W;
-      dir = -1;
-    }
-  }
-
-  reportRect(now);
-
-  const phase = (now / 1000) * BOB_HZ * Math.PI * 2;
-  const bob = Math.sin(phase) * BOB_AMP;
-  const step = Math.sin(phase) * 6;
-  const y = baselineY + Math.abs(bob);
-
-  ctx.clearRect(0, 0, w, window.innerHeight);
-
-  const footWiggle = s.walk ? step : 0;
-  ctx.fillStyle = shade(s.color, -0.25);
-  ctx.fillRect(x + 12, y + PET_H, 14, 9 + footWiggle);
-  ctx.fillRect(x + PET_W - 26, y + PET_H, 14, 9 - footWiggle);
-
-  ctx.fillStyle = s.color;
-  roundRect(ctx, x, y, PET_W, PET_H, 14);
-  ctx.fill();
-
-  const eyeCx = dir === 1 ? x + PET_W - 18 : x + 18;
-  const eyeCy = y + 24;
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath();
-  ctx.arc(eyeCx, eyeCy, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#1a1a1a";
-  ctx.beginPath();
-  ctx.arc(eyeCx + dir * 2.5, eyeCy, 4, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (s.emote) {
-    ctx.font = "26px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(s.emote, x + PET_W / 2, y - 18);
-  }
-
-  const labelText = stateDetail ? `${s.label}: ${stateDetail}` : s.label;
-  ctx.font = "12px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  const labelW = ctx.measureText(labelText).width + 12;
-  roundRect(ctx, x + PET_W / 2 - labelW / 2, y + PET_H + 14, labelW, 18, 9);
-  ctx.fill();
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText(labelText, x + PET_W / 2, y + PET_H + 17);
-
-  requestAnimationFrame(draw);
+let lastRectSent = 0;
+function reportRects(now: number) {
+  if (now - lastRectSent < 40 || pets.length === 0) return;
+  lastRectSent = now;
+  const rects = pets.map((p) => {
+    const b = petBox(p);
+    return { id: p.id, x: b.x, y: b.y, w: b.w, h: b.h };
+  });
+  invoke("update_pet_rects", { rects }).catch(() => {});
 }
 
 function shade(hex: string, amt: number): string {
-  const n = parseInt(hex.slice(1), 16);
+  const n = parseInt(hex.slice(1, 7), 16);
   const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
   const r = clamp(((n >> 16) & 0xff) * (1 + amt));
   const g = clamp(((n >> 8) & 0xff) * (1 + amt));
@@ -447,6 +399,133 @@ function shade(hex: string, amt: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+function drawPet(pet: Pet, now: number, dt: number, w: number) {
+  if (pet.state === "completed" && now >= pet.revertAt) {
+    pet.state = "idle";
+    pet.detail = "";
+    if (pet.id === selected) refreshHeader();
+  }
+  const m = meta(pet.state);
+  const dim = pet.state === "error" || pet.state === "exited" || pet.state === "auth_required";
+
+  if (m.walk) {
+    pet.x += pet.dir * SPEED * dt;
+    if (pet.x <= 0) {
+      pet.x = 0;
+      pet.dir = 1;
+    } else if (pet.x + PET_W >= w) {
+      pet.x = w - PET_W;
+      pet.dir = -1;
+    }
+  }
+
+  const phase = (now / 1000) * BOB_HZ * Math.PI * 2 + pet.x * 0.01;
+  const bob = Math.sin(phase) * BOB_AMP;
+  const step = m.walk ? Math.sin(phase) * 6 : 0;
+  const y = baselineY + Math.abs(bob);
+
+  ctx.globalAlpha = dim ? 0.5 : 1;
+
+  // Feet.
+  ctx.fillStyle = shade(pet.color, -0.25);
+  ctx.fillRect(pet.x + 12, y + PET_H, 14, 9 + step);
+  ctx.fillRect(pet.x + PET_W - 26, y + PET_H, 14, 9 - step);
+
+  // Body.
+  ctx.fillStyle = pet.color;
+  roundRect(ctx, pet.x, y, PET_W, PET_H, 14);
+  ctx.fill();
+
+  // Eye.
+  const eyeCx = pet.dir === 1 ? pet.x + PET_W - 18 : pet.x + 18;
+  const eyeCy = y + 24;
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.arc(eyeCx, eyeCy, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#1a1a1a";
+  ctx.beginPath();
+  ctx.arc(eyeCx + pet.dir * 2.5, eyeCy, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.globalAlpha = 1;
+
+  // Emote.
+  if (m.emote) {
+    ctx.font = "26px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(m.emote, pet.x + PET_W / 2, y - 18);
+  }
+
+  // Name (+ state) label.
+  const label = m.label ? `${pet.name} · ${m.label}` : pet.name;
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const labelW = ctx.measureText(label).width + 14;
+  ctx.fillStyle = pet.id === selected ? "rgba(244,121,59,0.85)" : "rgba(0,0,0,0.55)";
+  roundRect(ctx, pet.x + PET_W / 2 - labelW / 2, y + PET_H + 14, labelW, 18, 9);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(label, pet.x + PET_W / 2, y + PET_H + 17);
+}
+
+function draw(now: number) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  const w = window.innerWidth;
+  ctx.clearRect(0, 0, w, window.innerHeight);
+  for (const pet of pets) drawPet(pet, now, dt, w);
+  reportRects(now);
+  requestAnimationFrame(draw);
+}
+
+canvas.addEventListener("click", (e) => {
+  for (const pet of pets) {
+    const b = petBox(pet);
+    if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
+      openPanelFor(pet.id);
+      return;
+    }
+  }
+});
+
+async function init() {
+  let agents: AgentInfo[] = [];
+  try {
+    agents = await invoke<AgentInfo[]>("list_agents");
+  } catch (e) {
+    console.error("list_agents failed", e);
+  }
+  const w = window.innerWidth;
+  agents.forEach((a, i) => {
+    const container = document.createElement("div");
+    container.className = "agent-transcript";
+    container.style.display = "none";
+    messagesHost.appendChild(container);
+    const pet: Pet = {
+      id: a.id,
+      name: a.name,
+      color: a.color,
+      x: Math.max(0, ((i + 1) * w) / (agents.length + 1) - PET_W / 2),
+      dir: i % 2 === 0 ? 1 : -1,
+      state: "connecting",
+      detail: "",
+      revertAt: 0,
+      container,
+      currentAgent: null,
+      currentThinking: null,
+      toolChips: new Map(),
+    };
+    pets.push(pet);
+    petById.set(a.id, pet);
+  });
+  if (pets.length > 0) selected = pets[0].id;
+}
+
 window.addEventListener("resize", resize);
 resize();
-requestAnimationFrame(draw);
+init().then(() => {
+  requestAnimationFrame(draw);
+});
