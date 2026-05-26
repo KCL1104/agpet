@@ -53,8 +53,19 @@ fn retry_agent(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Re
 }
 
 #[tauri::command]
-fn send_prompt(instance: String, text: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
-    state.send_prompt(&instance, text)
+fn send_prompt(
+    instance: String,
+    text: String,
+    files: Vec<String>,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<(), String> {
+    state.send_prompt(&instance, text, files)
+}
+
+/// Files under an instance's working dir, for the chat `@`-mention picker.
+#[tauri::command]
+fn list_dir_files(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<Vec<String>, String> {
+    state.list_dir_files(&instance)
 }
 
 #[tauri::command]
@@ -137,6 +148,7 @@ pub fn run() {
             close_instance,
             retry_agent,
             send_prompt,
+            list_dir_files,
             respond_permission,
             new_session,
             resume_session,

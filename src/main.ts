@@ -16,7 +16,7 @@ const PET_H = 64;
 const SPEED = 120;
 const BOB_HZ = 3;
 const BOB_AMP = 6;
-const MARGIN_BOTTOM = 28;
+const MARGIN_BOTTOM = 30; // leave room below the pet for its name label + taskbar
 
 let baselineY = 0;
 let last = performance.now();
@@ -33,8 +33,8 @@ interface Pet {
   name: string;
   color: string;
   x: number;
+  customY: number; // roaming height set by dragging; -1 = default baseline
   dir: 1 | -1;
-  pinned: boolean; // true once the user drags it; stops lane-walking, stays put
   state: string;
   detail: string;
   revertAt: number;
@@ -68,6 +68,7 @@ function meta(state: string) {
 const panel = document.getElementById("chat-panel") as HTMLDivElement;
 const messagesHost = document.getElementById("chat-messages") as HTMLDivElement;
 const inputEl = document.getElementById("chat-input") as HTMLTextAreaElement;
+const filePicker = document.getElementById("file-picker") as HTMLDivElement;
 const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
@@ -495,19 +496,126 @@ function closePanel() {
   updatePanelOpen();
 }
 
+// --- @ file-mention picker ------------------------------------------------
+const fileCache = new Map<string, string[]>(); // instance_id -> cwd file list
+let picker: { items: string[]; sel: number; tokenStart: number } | null = null;
+const mentionedFiles = new Set<string>();
+
+async function ensureFiles(instanceId: string): Promise<string[]> {
+  const cached = fileCache.get(instanceId);
+  if (cached) return cached;
+  try {
+    const files = await invoke<string[]>("list_dir_files", { instance: instanceId });
+    fileCache.set(instanceId, files);
+    return files;
+  } catch {
+    fileCache.set(instanceId, []);
+    return [];
+  }
+}
+
+// The @-token being typed: from the last "@" back to the cursor with no
+// whitespace in between. null when the cursor isn't inside a mention.
+function activeMention(): { query: string; start: number } | null {
+  const pos = inputEl.selectionStart ?? inputEl.value.length;
+  const upto = inputEl.value.slice(0, pos);
+  const at = upto.lastIndexOf("@");
+  if (at < 0) return null;
+  if (at > 0 && !/\s/.test(upto[at - 1])) return null; // must be a standalone @
+  const query = upto.slice(at + 1);
+  if (/\s/.test(query)) return null; // mention ends at whitespace
+  return { query, start: at };
+}
+
+function scoreFile(path: string, q: string): number {
+  if (!q) return 0;
+  const p = path.toLowerCase();
+  const base = p.slice(p.lastIndexOf("/") + 1);
+  if (base.startsWith(q)) return 3;
+  if (base.includes(q)) return 2;
+  if (p.includes(q)) return 1;
+  return 0;
+}
+
+function renderPicker() {
+  if (!picker) return;
+  filePicker.innerHTML = "";
+  picker.items.forEach((f, i) => {
+    const row = document.createElement("div");
+    row.className = "fp-row" + (i === picker!.sel ? " sel" : "");
+    row.textContent = f;
+    // mousedown (not click) so the textarea keeps focus/selection for insertion
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); selectFile(i); });
+    filePicker.appendChild(row);
+  });
+  filePicker.classList.remove("hidden");
+  const selRow = filePicker.children[picker.sel] as HTMLElement | undefined;
+  selRow?.scrollIntoView({ block: "nearest" });
+}
+
+function hidePicker() {
+  picker = null;
+  filePicker.classList.add("hidden");
+  filePicker.innerHTML = "";
+}
+
+async function refreshPicker() {
+  const pet = selectedPet();
+  const m = pet ? activeMention() : null;
+  if (!pet || !m) { hidePicker(); return; }
+  const files = await ensureFiles(pet.id);
+  const m2 = activeMention(); // re-validate: the mention may have changed while awaiting
+  if (!m2 || m2.start !== m.start) return;
+  const q = m2.query.toLowerCase();
+  const items = files
+    .filter((f) => f.toLowerCase().includes(q))
+    .sort((a, b) => scoreFile(b, q) - scoreFile(a, q))
+    .slice(0, 12);
+  if (items.length === 0) { hidePicker(); return; }
+  picker = { items, sel: 0, tokenStart: m2.start };
+  renderPicker();
+}
+
+function selectFile(i: number) {
+  if (!picker) return;
+  const path = picker.items[i];
+  const pos = inputEl.selectionStart ?? inputEl.value.length;
+  const before = inputEl.value.slice(0, picker.tokenStart);
+  const after = inputEl.value.slice(pos);
+  const insert = "@" + path + " ";
+  inputEl.value = before + insert + after;
+  const caret = before.length + insert.length;
+  inputEl.setSelectionRange(caret, caret);
+  mentionedFiles.add(path);
+  hidePicker();
+  inputEl.focus();
+}
+
 function sendPrompt() {
   const pet = selectedPet();
   const text = inputEl.value.trim();
   if (!pet || !text) return;
+  // Only attach files still referenced in the text (the user may have deleted some).
+  const files = [...mentionedFiles].filter((f) => text.includes("@" + f));
   addMsgTo(pet, "user", text);
   resetTurn(pet);
-  invoke("send_prompt", { instance: pet.id, text }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
+  invoke("send_prompt", { instance: pet.id, text, files }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
+  mentionedFiles.clear();
+  hidePicker();
 }
 
 sendBtn.addEventListener("click", sendPrompt);
-closeBtn.addEventListener("click", closePanel);
+closeBtn.addEventListener("click", () => { hidePicker(); closePanel(); });
+inputEl.addEventListener("input", () => { void refreshPicker(); });
+inputEl.addEventListener("blur", () => { setTimeout(hidePicker, 120); });
 inputEl.addEventListener("keydown", (e) => {
+  if (picker) {
+    if (e.key === "ArrowDown") { e.preventDefault(); picker.sel = (picker.sel + 1) % picker.items.length; renderPicker(); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); picker.sel = (picker.sel - 1 + picker.items.length) % picker.items.length; renderPicker(); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); selectFile(picker.sel); return; }
+    if (e.key === "Escape") { e.preventDefault(); hidePicker(); return; }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendPrompt();
@@ -605,8 +713,8 @@ function addPet(info: InstanceInfo) {
     name: info.name,
     color: info.color,
     x: -1, // assigned by layoutPets
+    customY: -1, // roaming height; -1 = default baseline, set by dragging
     dir: pets.length % 2 === 0 ? 1 : -1,
-    pinned: false,
     state: "connecting",
     detail: "",
     revertAt: 0,
@@ -622,11 +730,8 @@ function addPet(info: InstanceInfo) {
   const savedPos = localStorage.getItem("agpet.pos." + pet.id);
   if (savedPos) {
     try {
-      const { x } = JSON.parse(savedPos);
-      if (typeof x === "number") {
-        pet.x = Math.max(0, Math.min(window.innerWidth - PET_W, x));
-        pet.pinned = true;
-      }
+      const { y } = JSON.parse(savedPos);
+      if (typeof y === "number") pet.customY = y; // walk at the saved height
     } catch {}
   }
   pets.push(pet);
@@ -792,6 +897,7 @@ listen<PermissionRequest>("permission-request", (event) => {
 listen<{ instance_id: string }>("session-reset", (event) => {
   const pet = petById.get(event.payload.instance_id);
   if (pet) clearTranscript(pet);
+  fileCache.delete(event.payload.instance_id); // re-list files for the new session
 });
 
 listen<InstanceInfo>("instance-added", (event) => {
@@ -824,8 +930,13 @@ function roundRect(c: CanvasRenderingContext2D, rx: number, ry: number, rw: numb
   c.closePath();
 }
 
+// Vertical anchor (no bob): the pet's dragged height, else the roaming baseline.
+function petTop(pet: Pet) {
+  return pet.customY >= 0 ? pet.customY : baselineY;
+}
+
 function petBox(pet: Pet) {
-  return { x: pet.x - 8, y: baselineY - 40, w: PET_W + 16, h: PET_H + 90 };
+  return { x: pet.x - 8, y: petTop(pet) - 40, w: PET_W + 16, h: PET_H + 90 };
 }
 
 // Bounding rects of any open panels, so the overlay keeps just those areas
@@ -882,11 +993,12 @@ function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, coun
   const m = meta(pet.state);
   const dim = pet.state === "error" || pet.state === "exited" || pet.state === "auth_required";
 
-  if (pet.pinned) {
-    // Dragged pets stay where dropped — no lane, no walking. Just keep on-screen.
+  const beingDragged = !!drag && drag.pet === pet && drag.moved;
+  if (beingDragged) {
+    // Follow the cursor during the drag (x + customY are set by mousemove).
     pet.x = Math.max(0, Math.min(w - PET_W, pet.x));
   } else {
-    // Each pet roams its own horizontal lane so they don't pile up.
+    // Roam a horizontal lane (at the pet's height) so they don't pile up.
     const laneW = w / Math.max(1, count);
     const minX = idx * laneW + 4;
     const maxX = idx * laneW + laneW - PET_W - 4;
@@ -902,11 +1014,15 @@ function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, coun
       }
     }
   }
+  // Keep a dragged height within the window (body + below-label visible).
+  if (pet.customY >= 0) {
+    pet.customY = Math.max(4, Math.min(window.innerHeight - PET_H - 36, pet.customY));
+  }
 
   const phase = (now / 1000) * BOB_HZ * Math.PI * 2 + pet.x * 0.01;
   const bob = Math.sin(phase) * BOB_AMP;
   const step = m.walk ? Math.sin(phase) * 6 : 0;
-  const y = baselineY + Math.abs(bob);
+  const y = petTop(pet) + Math.abs(bob);
 
   ctx.globalAlpha = dim ? 0.5 : 1;
   ctx.fillStyle = shade(pet.color, -0.25);
@@ -999,16 +1115,16 @@ function drawHandoffs(now: number) {
   }
 }
 
-// Pointer drag: a press that moves past the threshold pins the pet to where it's
-// dropped; a press that barely moves is treated as a click that opens the panel.
+// Pointer drag: moving past the threshold sets the pet's roaming height (it keeps
+// walking there); a press that barely moves is a click that opens the chat panel.
 const DRAG_THRESHOLD = 4;
-let drag: { pet: Pet; offsetX: number; startX: number; startY: number; moved: boolean } | null = null;
+let drag: { pet: Pet; offsetX: number; offsetY: number; startX: number; startY: number; moved: boolean } | null = null;
 
 canvas.addEventListener("mousedown", (e) => {
   for (const pet of pets) {
     const b = petBox(pet);
     if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
-      drag = { pet, offsetX: e.clientX - pet.x, startX: e.clientX, startY: e.clientY, moved: false };
+      drag = { pet, offsetX: e.clientX - pet.x, offsetY: e.clientY - petTop(pet), startX: e.clientX, startY: e.clientY, moved: false };
       // Keep the window interactive for the whole drag, even if the cursor
       // briefly outruns the pet's (33ms-stale) hit rect.
       invoke("set_dragging", { dragging: true }).catch(() => {});
@@ -1024,8 +1140,8 @@ window.addEventListener("mousemove", (e) => {
     drag.moved = true;
   }
   if (drag.moved) {
-    drag.pet.pinned = true;
     drag.pet.x = Math.max(0, Math.min(window.innerWidth - PET_W, e.clientX - drag.offsetX));
+    drag.pet.customY = e.clientY - drag.offsetY; // sets the walking height; clamped in drawPet
   }
 });
 
@@ -1035,9 +1151,24 @@ window.addEventListener("mouseup", () => {
   drag = null;
   invoke("set_dragging", { dragging: false }).catch(() => {});
   if (moved) {
-    localStorage.setItem("agpet.pos." + pet.id, JSON.stringify({ x: pet.x })); // remember the drop
+    localStorage.setItem("agpet.pos." + pet.id, JSON.stringify({ y: pet.customY })); // remember the walking height
   } else {
     openPanelFor(pet.id); // a click, not a drag
+  }
+});
+
+// Double-click a pet to reset it to the default roaming height.
+canvas.addEventListener("dblclick", (e) => {
+  for (const pet of pets) {
+    const b = petBox(pet);
+    if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
+      if (pet.customY >= 0) {
+        pet.customY = -1;
+        localStorage.removeItem("agpet.pos." + pet.id);
+        showToast(`${pet.name} back to default height`);
+      }
+      return;
+    }
   }
 });
 

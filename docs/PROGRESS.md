@@ -204,6 +204,15 @@ Tauri v2 + 透明 always-on-top overlay + Canvas 占位寵物左右走動。
 - **工具輸出渲染**（`acp/client.rs` + `main.ts` + `styles.css`）：`chat_event` 的 `tool_call_update` 原本只送 status，現加 `result`（`update.content` 經既有 `extract_text` 取文字）。前端 chip 改成 `.tool-head`（可點）+ 折疊 `.tool-out`（`<pre>`）：有輸出時加 `has-out`（顯示 ▸）、點 head 展開/收合；輸出截 4000 字避免 DOM 爆。CSS 加 `.tool-head`/`.tool-out`（等寬、捲動、最高 220px）。
 - **編譯**：`cargo check` + `tsc --noEmit` 通過。**待使用者目視驗證**：跑 workflow 期間再觸發第二個 → 被拒 + toast、第一個照跑完；拖寵物後重啟 app 再開同一隻 → 回到放開處；跑工具（如 `date`/讀檔）→ chip 可點開看輸出、completed/failed 樣式照舊、大輸出可捲。
 
+## 互動打磨（@ 檔案選取 + 拖曳高度 + 捲軸）✅ 完成（使用者實測中）
+
+- **`@` 檔案選取（prompt 內 mention）**：聊天輸入框打 `@` → 跳出該寵物**工作資料夾**檔案清單；↑/↓/Enter/Tab/Esc/點選操作，選中插入 `@相對路徑`。
+  - 後端：`AcpManager.list_dir_files(instance)`（`std::fs` 遞迴走訪 `Instance.cwd`，跳過 `.git`/`node_modules`/`target`… 上限 3000、`/` 分隔）+ `cwd_of`；`lib.rs` 加 `list_dir_files` command。送出時 `AcpCommand::Prompt` 改帶 `files: Vec<String>`，`client.rs` 在 text block 後**每檔加一個 `ContentBlock::ResourceLink`**（`file://` uri，由 cwd 解析），讓 agent 能讀；`@路徑` 文字保留當備援。
+  - 前端（`main.ts`/`index.html`/`styles.css`）：`#file-picker` 下拉；`activeMention()` 抓游標前的 `@token`、`list_dir_files` 結果以 instance 快取（session-reset 失效）、子字串過濾（檔名開頭優先）、鍵盤導覽；`sendPrompt` 帶 `files`（只送仍出現在文字中的）。
+- **拖曳＝設定「走動高度」**（修正先前「釘住不動」的誤解）：`Pet.customY`（-1=預設基準線）；拖曳時跟游標、放手後**在該高度繼續左右巡邏**（不再凍結）；**雙擊**重設回預設高度。高度存 `agpet.pos.<id>={y}` 跨重啟。`MARGIN_BOTTOM` 預設基準線可調（目前 30）。
+- **捲軸樣式**：`#chat-messages`/`#history-view`/`#file-picker`/`.tool-out` 改細的圓角藥丸 thumb、軌道透明、hover 變亮（取代預設灰條）。
+- **編譯**：`cargo check` + `tsc --noEmit` 通過；dev server 實測中。
+
 ## 下一步（新對話接手）
 
 - **Antigravity CLI**（持續延後，**已查證：目前做不了**）：Google 已於 **2026-05-19 用 Antigravity CLI（`agy`，Go 改寫）取代 Gemini CLI**，但 `agy` **尚無 ACP 模式**（無 `--experimental-acp`/`acp` 子命令；程式化整合走另一套 Antigravity SDK，非 ACP stdio）。社群有請願 [zed-industries/zed #57221] 追蹤。⚠️ 另：既有 `gemini --experimental-acp` 型別還能用，但 **Gemini CLI 個人版 2026-06-18 將停用**，屆時該寵物可能連不上、且尚無 ACP 後繼者。→ 待 `agy` 出 ACP 再加（config-only）。

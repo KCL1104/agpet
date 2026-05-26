@@ -28,7 +28,9 @@ use crate::db::Db;
 
 /// Commands sent into a live instance's connection.
 pub enum AcpCommand {
-    Prompt(String),
+    /// User prompt text plus any @-mentioned files (cwd-relative paths) to
+    /// attach as ACP resource links.
+    Prompt { text: String, files: Vec<String> },
     NewSession,
     Resume(String),
     SetMode(String),
@@ -280,8 +282,8 @@ impl AcpManager {
             .map_err(|_| format!("instance {instance_id} is not running"))
     }
 
-    pub fn send_prompt(&self, instance_id: &str, text: String) -> Result<(), String> {
-        self.send(instance_id, AcpCommand::Prompt(text))
+    pub fn send_prompt(&self, instance_id: &str, text: String, files: Vec<String>) -> Result<(), String> {
+        self.send(instance_id, AcpCommand::Prompt { text, files })
     }
     pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
         self.send(instance_id, AcpCommand::NewSession)
@@ -328,6 +330,27 @@ impl AcpManager {
             .map(|i| i.type_id.clone())
     }
 
+    pub fn cwd_of(&self, instance_id: &str) -> Option<PathBuf> {
+        self.instances
+            .lock()
+            .ok()?
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .map(|i| i.cwd.clone())
+    }
+
+    /// Files under an instance's working dir (cwd-relative, `/`-separated), for
+    /// the chat `@`-mention picker. Skips heavy/noise dirs and caps the count.
+    pub fn list_dir_files(&self, instance_id: &str) -> Result<Vec<String>, String> {
+        let root = self
+            .cwd_of(instance_id)
+            .ok_or_else(|| format!("instance {instance_id} not found"))?;
+        let mut out = Vec::new();
+        walk_dir(&root, &root, &mut out, 0);
+        out.sort();
+        Ok(out)
+    }
+
     pub fn db_handle(&self) -> Arc<Db> {
         self.db.clone()
     }
@@ -360,5 +383,41 @@ impl AcpManager {
             self.workflow_running.clone(),
         );
         Ok(())
+    }
+}
+
+/// Dirs never descended into when listing files for the `@`-mention picker.
+const SKIP_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", "dist", "build", ".next", ".nuxt",
+    ".svelte-kit", ".venv", "venv", "__pycache__", ".cache", "vendor",
+    ".gradle", ".idea", ".vscode",
+];
+const MAX_LISTED_FILES: usize = 3000;
+
+/// Recursively collect files under `root` as `/`-separated paths relative to
+/// `root`. Bounded by [`MAX_LISTED_FILES`] and a depth limit.
+fn walk_dir(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
+    if out.len() >= MAX_LISTED_FILES || depth > 12 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if out.len() >= MAX_LISTED_FILES {
+            return;
+        }
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if ft.is_dir() {
+            if SKIP_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            walk_dir(root, &path, out, depth + 1);
+        } else if ft.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
     }
 }

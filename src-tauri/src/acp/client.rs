@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ModelId, NewSessionRequest, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification, SetSessionModeRequest,
     SetSessionModelRequest, TextContent,
 };
@@ -255,7 +255,7 @@ pub fn start(
                 let mut rx = cmd_rx;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        AcpCommand::Prompt(text) => {
+                        AcpCommand::Prompt { text, files } => {
                             let ctx = ctx_main.lock().ok().and_then(|mut g| g.take());
                             let full_text = match &ctx {
                                 Some(c) => format!("{c}\n\n---\n\nUser: {text}"),
@@ -267,7 +267,14 @@ pub fn start(
                             }
                             if let Ok(mut t) = turn_main.lock() { t.clear(); }
                             if let Ok(mut t) = thought_main.lock() { t.clear(); }
-                            let req = PromptRequest::new(acp_session.clone(), vec![ContentBlock::Text(TextContent::new(full_text))]);
+                            // Text block, then a resource link per @-mentioned file so the
+                            // agent can read it (the @path also stays in the text as a fallback).
+                            let mut blocks = vec![ContentBlock::Text(TextContent::new(full_text))];
+                            for rel in &files {
+                                let uri = file_uri(&cwd_main.join(rel));
+                                blocks.push(ContentBlock::ResourceLink(ResourceLink::new(rel.clone(), uri)));
+                            }
+                            let req = PromptRequest::new(acp_session.clone(), blocks);
                             match conn.send_request(req).block_task().await {
                                 Ok(_) => {
                                     record_turn(&db_main, &cur_id_main, &turn_main, &thought_main).await;
@@ -532,6 +539,17 @@ fn chat_event(notification: &SessionNotification) -> Option<serde_json::Value> {
         })),
         "plan" => Some(json!({ "kind": "plan" })),
         _ => None,
+    }
+}
+
+/// `file://` URI for an absolute path (forward slashes; works for both
+/// `/unix/abs` and `C:\windows\abs` inputs).
+fn file_uri(path: &std::path::Path) -> String {
+    let fwd = path.to_string_lossy().replace('\\', "/");
+    if fwd.starts_with('/') {
+        format!("file://{fwd}")
+    } else {
+        format!("file:///{fwd}")
     }
 }
 

@@ -336,14 +336,43 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+/* Slim, floating scrollbars (WebView2 / Chromium) — transparent track, pill thumb. */
+#chat-messages,
+#history-view,
+#file-picker,
+.tool-out {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
 #chat-messages::-webkit-scrollbar,
-#history-view::-webkit-scrollbar {
-  width: 8px;
+#history-view::-webkit-scrollbar,
+#file-picker::-webkit-scrollbar,
+.tool-out::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+#chat-messages::-webkit-scrollbar-track,
+#history-view::-webkit-scrollbar-track,
+#file-picker::-webkit-scrollbar-track,
+.tool-out::-webkit-scrollbar-track {
+  background: transparent;
 }
 #chat-messages::-webkit-scrollbar-thumb,
-#history-view::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+#history-view::-webkit-scrollbar-thumb,
+#file-picker::-webkit-scrollbar-thumb,
+.tool-out::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+  min-height: 28px;
+}
+#chat-messages::-webkit-scrollbar-thumb:hover,
+#history-view::-webkit-scrollbar-thumb:hover,
+#file-picker::-webkit-scrollbar-thumb:hover,
+.tool-out::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
+  background-clip: padding-box;
 }
 
 .agent-transcript {
@@ -529,11 +558,45 @@ body {
 
 /* ---- Input ---- */
 .chat-input-row {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--border);
+}
+
+/* ---- @ file-mention picker ---- */
+#file-picker {
+  position: absolute;
+  bottom: calc(100% - 4px);
+  left: 12px;
+  right: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel-bg, rgba(22, 24, 29, 0.98));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  z-index: 20;
+}
+#file-picker.hidden {
+  display: none;
+}
+.fp-row {
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.fp-row.sel {
+  background: var(--accent-soft);
 }
 #chat-input {
   flex: 1;
