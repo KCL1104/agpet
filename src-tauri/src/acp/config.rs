@@ -107,6 +107,20 @@ fn default_agents() -> Vec<AgentDef> {
             args: vec!["acp".into()],
             color: "#6e7681".into(),
         },
+        AgentDef {
+            id: "copilot".into(),
+            name: "Copilot".into(),
+            command: "copilot".into(),
+            args: vec!["--acp".into()],
+            color: "#8b5cf6".into(),
+        },
+        AgentDef {
+            id: "gemini".into(),
+            name: "Gemini".into(),
+            command: "gemini".into(),
+            args: vec!["--experimental-acp".into()],
+            color: "#4e8cf5".into(),
+        },
     ]
 }
 
@@ -134,4 +148,20 @@ name = "OpenCode"
 command = "opencode"
 args = ["acp"]
 color = "#6e7681"
+
+# GitHub Copilot CLI (ACP public preview): needs `copilot` installed + logged in.
+[[agent]]
+id = "copilot"
+name = "Copilot"
+command = "copilot"
+args = ["--acp"]
+color = "#8b5cf6"
+
+# Google Gemini CLI (reference ACP impl): needs `gemini` installed + logged in.
+[[agent]]
+id = "gemini"
+name = "Gemini"
+command = "gemini"
+args = ["--experimental-acp"]
+color = "#4e8cf5"
 "##;

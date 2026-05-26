@@ -675,8 +675,7 @@ function shade(hex: string, amt: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function drawPet(pet: Pet, now: number, dt: number, w: number) {
-  if (pet.x < 0) pet.x = 0;
+function drawPet(pet: Pet, now: number, dt: number, w: number, idx: number, count: number) {
   if (pet.state === "completed" && now >= pet.revertAt) {
     pet.state = "idle";
     pet.detail = "";
@@ -685,10 +684,20 @@ function drawPet(pet: Pet, now: number, dt: number, w: number) {
   const m = meta(pet.state);
   const dim = pet.state === "error" || pet.state === "exited" || pet.state === "auth_required";
 
-  if (m.walk) {
-    pet.x += pet.dir * SPEED * dt;
-    if (pet.x <= 0) { pet.x = 0; pet.dir = 1; }
-    else if (pet.x + PET_W >= w) { pet.x = w - PET_W; pet.dir = -1; }
+  // Each pet roams its own horizontal lane so they don't pile up.
+  const laneW = w / Math.max(1, count);
+  const minX = idx * laneW + 4;
+  const maxX = idx * laneW + laneW - PET_W - 4;
+  if (maxX <= minX) {
+    pet.x = idx * laneW + Math.max(0, (laneW - PET_W) / 2);
+  } else {
+    if (pet.x < minX) pet.x = minX;
+    if (pet.x > maxX) pet.x = maxX;
+    if (m.walk) {
+      pet.x += pet.dir * SPEED * dt;
+      if (pet.x <= minX) { pet.x = minX; pet.dir = 1; }
+      else if (pet.x >= maxX) { pet.x = maxX; pet.dir = -1; }
+    }
   }
 
   const phase = (now / 1000) * BOB_HZ * Math.PI * 2 + pet.x * 0.01;
@@ -739,7 +748,7 @@ function draw(now: number) {
   last = now;
   const w = window.innerWidth;
   ctx.clearRect(0, 0, w, window.innerHeight);
-  for (const pet of pets) drawPet(pet, now, dt, w);
+  pets.forEach((pet, i) => drawPet(pet, now, dt, w, i, pets.length));
   reportRects(now);
   requestAnimationFrame(draw);
 }
