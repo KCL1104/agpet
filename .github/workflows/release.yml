@@ -1,0 +1,74 @@
+name: Release
+
+# Build agpet and publish downloadable installers on every push to `main`.
+# Also runnable on demand from the Actions tab (workflow_dispatch).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Avoid stacking builds: a newer push to main cancels an in-flight one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    permissions:
+      contents: write # needed for tauri-action to create the GitHub Release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One universal binary that runs on both Apple Silicon and Intel Macs.
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          # Windows x64 — produces an NSIS .exe installer and a .msi.
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS needs both arches to assemble the universal binary.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # __VERSION__ is read from src-tauri/tauri.conf.json. Pushing main with an
+          # unchanged version updates the same release; bump the version to cut a new one.
+          tagName: app-v__VERSION__
+          releaseName: agpet v__VERSION__
+          releaseBody: |
+            Download the installer for your platform from the Assets below.
+
+            - **Windows** — `.exe` (NSIS installer) or `.msi`.
+            - **macOS** — `.dmg` (universal: Apple Silicon + Intel).
+
+            macOS note: builds are not yet Apple-notarized. If macOS says the app
+            "is damaged and can't be opened", run once in Terminal:
+            `xattr -cr /Applications/agpet.app`
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
