@@ -924,8 +924,9 @@ function dispatchOrchestrate(targets: Target[], text: string, files: string[], i
   const note = names.length
     ? `\n\n(Do your own part of this yourself, and start on it right away — don't wait on the others. ` +
       `For the parts meant for ${names.join(", ")}, hand them off with the \`delegate\` tool using wait:false ` +
-      `so they run in parallel (each reports in its own chat). Only use wait:true for a piece whose result you ` +
-      `genuinely need before you can continue.)`
+      `so they run in parallel (each reports in its own chat); delegate returns a handle. After you've done ` +
+      `your own work, if you want to fold their results into a final answer, call the \`collect\` tool with each ` +
+      `handle. Only use delegate wait:true for a piece whose result you need before you can even start.)`
     : "";
   addMsgTo(cur, "user", text); // show the original prompt in the mother's transcript
   resetTurn(cur);

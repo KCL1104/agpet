@@ -29,6 +29,12 @@ struct DelegateArgs {
     wait: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CollectArgs {
+    /// The handle returned by an earlier delegate(wait:false) call.
+    handle: String,
+}
+
 #[derive(Clone)]
 struct DelegateServer {
     tool_router: ToolRouter<Self>,
@@ -65,6 +71,19 @@ impl DelegateServer {
     async fn delegate(&self, Parameters(args): Parameters<DelegateArgs>) -> String {
         let mgr = self.app.state::<AcpManager>();
         match mgr.delegate(&args.agent, args.task, args.wait.unwrap_or(false)).await {
+            Ok(out) => out,
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Gather the result of a task you delegated with wait:false, using the \
+                       handle that delegate returned. Call this after doing your own work; it \
+                       blocks until that agent finishes (or returns at once if it already did)."
+    )]
+    async fn collect(&self, Parameters(args): Parameters<CollectArgs>) -> String {
+        let mgr = self.app.state::<AcpManager>();
+        match mgr.collect(&args.handle).await {
             Ok(out) => out,
             Err(e) => format!("Error: {e}"),
         }

@@ -14,7 +14,7 @@ pub use workflow::Workflow;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -115,6 +115,10 @@ pub struct AcpManager {
     /// agpet's MCP server URL (delegate tool); attached to sessions that support
     /// HTTP MCP. None if the server failed to start.
     mcp_url: Option<String>,
+    /// Pending non-blocking delegations: handle -> the sub-agent's result
+    /// receiver, awaited later by `collect`.
+    delegations: Mutex<HashMap<String, oneshot::Receiver<Result<String, String>>>>,
+    delegation_seq: AtomicU64,
 }
 
 impl AcpManager {
@@ -129,6 +133,8 @@ impl AcpManager {
             log_dir: config.log_dir.clone(),
             workflow_running: Arc::new(AtomicBool::new(false)),
             mcp_url,
+            delegations: Mutex::new(HashMap::new()),
+            delegation_seq: AtomicU64::new(1),
         }
     }
 
@@ -383,11 +389,34 @@ impl AcpManager {
         tx.send(AcpCommand::RunStep { text: task, reply: rtx })
             .map_err(|_| format!("agent '{id}' stopped"))?;
         if !wait {
-            return Ok(format!("dispatched to {id}"));
+            // Stash the result receiver under a handle so `collect` can fetch it
+            // after the caller has done its own work (it runs in the background).
+            let n = self.delegation_seq.fetch_add(1, Ordering::SeqCst);
+            let handle = format!("dlg-{n}");
+            if let Ok(mut m) = self.delegations.lock() {
+                m.insert(handle.clone(), rrx);
+            }
+            return Ok(format!(
+                "dispatched to {id} in the background (handle: {handle}). Do your own work, then call `collect` with handle \"{handle}\" to get its result."
+            ));
         }
         match rrx.await {
             Ok(r) => r,
             Err(_) => Err(format!("agent '{id}' did not reply")),
+        }
+    }
+
+    /// Await and return the result of a delegation previously dispatched with
+    /// `wait=false`, by its handle. Blocks until that sub-agent finishes (or
+    /// returns immediately if it already has).
+    pub async fn collect(&self, handle: &str) -> Result<String, String> {
+        let rrx = {
+            let mut m = self.delegations.lock().map_err(|_| "lock poisoned".to_string())?;
+            m.remove(handle).ok_or_else(|| format!("no pending delegation with handle '{handle}'"))?
+        };
+        match rrx.await {
+            Ok(r) => r,
+            Err(_) => Err(format!("delegation '{handle}' produced no result")),
         }
     }
     pub fn new_session(&self, instance_id: &str) -> Result<(), String> {
