@@ -9,5 +9,18 @@
   </head>
   <body>
     <canvas id="pet-canvas"></canvas>
+
+    <div id="chat-panel" class="hidden">
+      <div class="chat-header">
+        <span id="chat-title">Claude Code</span>
+        <button id="chat-close" title="Close">×</button>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="permission-bar" class="hidden"></div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" rows="2" placeholder="Ask Claude…  (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="chat-send">Send</button>
+      </div>
+    </div>
   </body>
 </html>

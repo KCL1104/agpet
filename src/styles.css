@@ -6,10 +6,192 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 #pet-canvas {
   position: fixed;
   inset: 0;
   display: block;
+}
+
+/* ---- Chat panel (M1 step 4) ------------------------------------------- */
+
+#chat-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 360px;
+  height: 460px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 30, 34, 0.92);
+  color: #e8e8ea;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  overflow: hidden;
+  font-size: 13px;
+}
+
+#chat-panel.hidden {
+  display: none;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 600;
+}
+
+#chat-close {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+#chat-close:hover {
+  color: #fff;
+}
+
+#chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg {
+  padding: 7px 10px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+  max-width: 90%;
+}
+.msg.user {
+  align-self: flex-end;
+  background: #3b6fe8;
+  color: #fff;
+}
+.msg.agent {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.08);
+}
+.msg.thinking {
+  align-self: flex-start;
+  font-style: italic;
+  color: #9aa0a6;
+  background: transparent;
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0;
+  padding-left: 8px;
+}
+.msg.system {
+  align-self: center;
+  color: #c0392b;
+  font-size: 12px;
+}
+
+.tool {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+  background: rgba(63, 164, 91, 0.14);
+  border: 1px solid rgba(63, 164, 91, 0.3);
+  border-radius: 8px;
+  padding: 5px 8px;
+  max-width: 90%;
+}
+.tool .badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  text-transform: uppercase;
+}
+.tool.completed .badge {
+  background: rgba(63, 164, 91, 0.5);
+}
+.tool.failed .badge {
+  background: rgba(192, 57, 43, 0.5);
+}
+
+#permission-bar {
+  padding: 10px 12px;
+  background: rgba(231, 181, 59, 0.14);
+  border-top: 1px solid rgba(231, 181, 59, 0.3);
+}
+#permission-bar.hidden {
+  display: none;
+}
+#permission-bar .perm-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+#permission-bar .perm-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#permission-bar button {
+  border: none;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.14);
+  color: #e8e8ea;
+}
+#permission-bar button.allow {
+  background: #3fa45b;
+  color: #fff;
+}
+#permission-bar button.reject {
+  background: #c0392b;
+  color: #fff;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+#chat-input {
+  flex: 1;
+  resize: none;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.25);
+  color: #e8e8ea;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+}
+#chat-send {
+  align-self: flex-end;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: #3b6fe8;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+#chat-send:hover {
+  background: #2f5fd0;
 }
