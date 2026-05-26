@@ -336,10 +336,12 @@ body {
   flex-direction: column;
   gap: 10px;
 }
-/* Slim, floating scrollbars (WebView2 / Chromium) — transparent track, pill thumb. */
+/* Slim, floating scrollbars (WebView2 / Chromium) — transparent track, pill
+   thumb, NO arrow buttons (the default ▲▼ buttons looked broken in the input). */
 #chat-messages,
 #history-view,
 #file-picker,
+#chat-input,
 .tool-out {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
@@ -347,19 +349,31 @@ body {
 #chat-messages::-webkit-scrollbar,
 #history-view::-webkit-scrollbar,
 #file-picker::-webkit-scrollbar,
+#chat-input::-webkit-scrollbar,
 .tool-out::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
+#chat-messages::-webkit-scrollbar-button,
+#history-view::-webkit-scrollbar-button,
+#file-picker::-webkit-scrollbar-button,
+#chat-input::-webkit-scrollbar-button,
+.tool-out::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
 #chat-messages::-webkit-scrollbar-track,
 #history-view::-webkit-scrollbar-track,
 #file-picker::-webkit-scrollbar-track,
+#chat-input::-webkit-scrollbar-track,
 .tool-out::-webkit-scrollbar-track {
   background: transparent;
 }
 #chat-messages::-webkit-scrollbar-thumb,
 #history-view::-webkit-scrollbar-thumb,
 #file-picker::-webkit-scrollbar-thumb,
+#chat-input::-webkit-scrollbar-thumb,
 .tool-out::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.16);
   border: 3px solid transparent;
@@ -370,6 +384,7 @@ body {
 #chat-messages::-webkit-scrollbar-thumb:hover,
 #history-view::-webkit-scrollbar-thumb:hover,
 #file-picker::-webkit-scrollbar-thumb:hover,
+#chat-input::-webkit-scrollbar-thumb:hover,
 .tool-out::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.34);
   background-clip: padding-box;

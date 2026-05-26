@@ -70,7 +70,7 @@ pub fn start(
     pending: PendingPermissions,
     db: Arc<Db>,
     agent_cfg: Arc<Mutex<serde_json::Value>>,
-) {
+) -> Option<tauri::async_runtime::JoinHandle<()>> {
     if std::env::var_os("CLAUDECODE").is_some() {
         std::env::remove_var("CLAUDECODE");
     }
@@ -80,7 +80,7 @@ pub fn start(
         Err(e) => {
             tracing::error!("[{instance_id}] cannot open message log: {e}");
             set_status(&status, AcpStatus::Error { message: format!("open message log: {e}") });
-            return;
+            return None;
         }
     };
 
@@ -96,7 +96,7 @@ pub fn start(
     let thought_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let pending_context: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-    tauri::async_runtime::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         let iid_notif = instance_id.clone();
         let iid_perm = instance_id.clone();
         let iid_main = instance_id.clone();
@@ -394,6 +394,7 @@ pub fn start(
             }
         }
     });
+    Some(handle)
 }
 
 #[allow(clippy::too_many_arguments)]

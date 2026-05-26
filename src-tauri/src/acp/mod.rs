@@ -94,6 +94,8 @@ struct Instance {
     pending: PendingPermissions,
     /// Agent config (authMethods / models / modes) filled in by the client.
     config: Arc<Mutex<serde_json::Value>>,
+    /// The connection task; aborted on reload/close to kill a hung adapter.
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 pub struct AcpManager {
@@ -172,10 +174,11 @@ impl AcpManager {
             cancel_tx: Some(cancel_tx),
             pending: pending.clone(),
             config: cfg.clone(),
+            task: None,
         });
 
         let log_path = self.log_dir.join(format!("acp-messages-{instance_id}.jsonl"));
-        client::start(
+        let task = client::start(
             self.app.clone(),
             instance_id.clone(),
             type_id.to_string(),
@@ -189,6 +192,11 @@ impl AcpManager {
             self.db.clone(),
             cfg,
         );
+        if let Ok(mut insts) = self.instances.lock() {
+            if let Some(inst) = insts.iter_mut().find(|i| i.instance_id == instance_id) {
+                inst.task = task;
+            }
+        }
 
         let _ = self.app.emit("instance-added", json!({
             "instance_id": instance_id, "type_id": type_id, "name": name, "color": color
@@ -204,7 +212,10 @@ impl AcpManager {
                 .iter()
                 .position(|i| i.instance_id == instance_id)
                 .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
-            insts.remove(pos); // drops cmd_tx -> client loop ends -> adapter killed
+            let inst = insts.remove(pos); // drops cmd_tx -> client loop ends -> adapter killed
+            if let Some(h) = inst.task {
+                h.abort(); // also kill a task stuck mid-handshake (won't see the dropped cmd_tx)
+            }
         }
         let _ = self.app.emit("instance-removed", json!({ "instance_id": instance_id }));
         Ok(())
@@ -222,6 +233,9 @@ impl AcpManager {
             let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
             inst.cmd_tx = Some(cmd_tx); // dropping the old sender stops the old loop
             inst.cancel_tx = Some(cancel_tx);
+            if let Some(h) = inst.task.take() {
+                h.abort(); // kill the old task — handles the stuck-on-connecting case
+            }
             if let Ok(mut s) = inst.status.lock() {
                 *s = AcpStatus::Connecting;
             }
@@ -242,7 +256,7 @@ impl AcpManager {
             .ok_or_else(|| format!("type gone: {type_id}"))?
             .clone();
         let log_path = self.log_dir.join(format!("acp-messages-{instance_id}.jsonl"));
-        client::start(
+        let task = client::start(
             self.app.clone(),
             instance_id.to_string(),
             type_id,
@@ -256,6 +270,11 @@ impl AcpManager {
             self.db.clone(),
             cfg,
         );
+        if let Ok(mut insts) = self.instances.lock() {
+            if let Some(inst) = insts.iter_mut().find(|i| i.instance_id == instance_id) {
+                inst.task = task;
+            }
+        }
         Ok(())
     }
 

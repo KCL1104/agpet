@@ -77,6 +77,7 @@ const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const permBar = document.getElementById("permission-bar") as HTMLDivElement;
 const newBtn = document.getElementById("chat-new") as HTMLButtonElement;
 const historyBtn = document.getElementById("chat-history") as HTMLButtonElement;
+const reloadBtn = document.getElementById("chat-reload") as HTMLButtonElement;
 const historyView = document.getElementById("history-view") as HTMLDivElement;
 const chatEmpty = document.getElementById("chat-empty") as HTMLDivElement;
 const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
@@ -665,6 +666,7 @@ function sendPrompt() {
   pet.currentPlan = null; // a new turn gets a fresh plan block
   invoke("send_prompt", { instance: pet.id, text, files, images }).catch((e) => addMsgTo(pet, "system", `send failed: ${e}`));
   inputEl.value = "";
+  inputEl.style.height = "auto"; // collapse back to one line
   mentionedFiles.clear();
   pendingImages.length = 0;
   renderAttachStrip();
@@ -680,13 +682,20 @@ function updateInputControls() {
   stopBtn.style.display = busy ? "grid" : "none";
 }
 
+// Grow the textarea with its content (up to the CSS max-height) so it never
+// shows a scrollbar until it's actually tall.
+function autoGrow() {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+}
+
 stopBtn.addEventListener("click", () => {
   const pet = selectedPet();
   if (pet) invoke("cancel_prompt", { instance: pet.id }).catch(() => {});
 });
 sendBtn.addEventListener("click", sendPrompt);
 closeBtn.addEventListener("click", () => { hidePicker(); closePanel(); });
-inputEl.addEventListener("input", () => { void refreshPicker(); });
+inputEl.addEventListener("input", () => { autoGrow(); void refreshPicker(); });
 inputEl.addEventListener("blur", () => { setTimeout(hidePicker, 120); });
 inputEl.addEventListener("keydown", (e) => {
   if (picker) {
@@ -706,6 +715,18 @@ newBtn.addEventListener("click", () => {
   if (!pet) return;
   invoke("new_session", { instance: pet.id }).catch(() => {});
   addMsgTo(pet, "system", "Summarizing & starting a new session…");
+});
+
+// Reload: kill this agent's (possibly stuck) connection and reconnect it.
+reloadBtn.addEventListener("click", () => {
+  const pet = selectedPet();
+  if (!pet) return;
+  invoke("retry_agent", { instance: pet.id }).catch((e) => showToast(`Reload failed: ${e}`));
+  pet.state = "connecting";
+  refreshHeader();
+  updateStatusBar(pet);
+  updateInputControls();
+  addMsgTo(pet, "system", "Reloading…");
 });
 
 historyBtn.addEventListener("click", () => {
