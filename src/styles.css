@@ -112,6 +112,10 @@ body {
 .wt-actions button:hover {
   filter: brightness(1.08);
 }
+.wt-commit {
+  background: #4e8cf5;
+  color: #fff;
+}
 .wt-merge {
   background: #3fa45b;
   color: #fff;

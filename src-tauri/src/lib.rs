@@ -133,6 +133,12 @@ fn worktree_merge(
     git::worktree_merge(&repo, &branch)
 }
 
+/// Stage + commit everything in a worktree (on its own branch).
+#[tauri::command]
+fn worktree_commit(path: String, message: String) -> Result<String, String> {
+    git::worktree_commit(std::path::Path::new(&path), &message)
+}
+
 /// Is the base instance's working dir a git repo? (Gate the worktree options.)
 #[tauri::command]
 fn is_git_repo(base_instance: String, state: tauri::State<'_, acp::AcpManager>) -> bool {
@@ -232,6 +238,7 @@ pub fn run() {
             worktree_list,
             worktree_remove,
             worktree_merge,
+            worktree_commit,
             is_git_repo,
             run_handoff,
             respond_permission,

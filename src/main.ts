@@ -247,9 +247,14 @@ async function buildWorktrees() {
     row.className = "wf-row";
     row.innerHTML =
       `<div class="wf-name"></div><div class="wf-need"></div>` +
-      `<div class="wt-actions"><button class="wt-merge">Merge</button><button class="wt-remove">Remove</button></div>`;
+      `<div class="wt-actions"><button class="wt-commit">Commit</button><button class="wt-merge">Merge</button><button class="wt-remove">Remove</button></div>`;
     row.querySelector(".wf-name")!.textContent = w.branch;
     row.querySelector(".wf-need")!.textContent = w.path;
+    row.querySelector(".wt-commit")!.addEventListener("click", () => {
+      invoke<string>("worktree_commit", { path: w.path, message: `agpet: ${w.branch}` })
+        .then((msg) => showToast(msg || "Committed"))
+        .catch((e) => showToast(`Commit: ${e}`));
+    });
     row.querySelector(".wt-merge")!.addEventListener("click", () => {
       invoke<string>("worktree_merge", { baseInstance: base.id, branch: w.branch })
         .then((msg) => showToast(msg || `Merged ${w.branch}`))

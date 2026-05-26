@@ -137,6 +137,33 @@ pub fn worktree_remove(repo: &Path, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Stage everything and commit in the worktree at `wt_path` (commits to that
+/// worktree's branch). Errors if there's nothing to commit.
+pub fn worktree_commit(wt_path: &Path, message: &str) -> Result<String, String> {
+    git(wt_path, &["add", "-A"])?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(wt_path)
+        .args(["commit", "-m", message])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        let summary = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("committed")
+            .trim()
+            .to_string();
+        Ok(format!("Committed — {summary}"))
+    } else {
+        // `git commit` prints "nothing to commit…" to stdout, errors to stderr.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let msg = if stderr.trim().is_empty() { stdout } else { stderr };
+        Err(msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("commit failed").trim().to_string())
+    }
+}
+
 /// Merge `branch` into the base repo's current branch (only brings in commits
 /// the worktree actually made). On conflict the merge is aborted so the repo
 /// stays clean and the user is told to merge manually.
