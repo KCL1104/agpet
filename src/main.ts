@@ -7,6 +7,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+
+marked.setOptions({ breaks: true, gfm: true });
+// Render `raw` markdown into `el` (sanitized — agent output is semi-trusted).
+function renderMarkdown(el: HTMLElement, raw: string) {
+  el.innerHTML = DOMPurify.sanitize(marked.parse(raw, { async: false }) as string);
+}
 
 const canvas = document.getElementById("pet-canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
@@ -1197,16 +1205,18 @@ listen<ChatEvent>("chat-event", (event) => {
     case "agent_message": {
       if (!ev.text) break;
       pet.currentThinking = null;
-      if (!pet.currentAgent) pet.currentAgent = addMsgTo(pet, "agent", "");
-      pet.currentAgent.textContent += ev.text;
+      if (!pet.currentAgent) pet.currentAgent = addMsgTo(pet, "agent md", "");
+      pet.currentAgent.dataset.raw = (pet.currentAgent.dataset.raw ?? "") + ev.text;
+      renderMarkdown(pet.currentAgent, pet.currentAgent.dataset.raw);
       if (pet.id === selected) scrollToBottom();
       break;
     }
     case "agent_thought": {
       if (!ev.text) break;
       pet.currentAgent = null;
-      if (!pet.currentThinking) pet.currentThinking = addMsgTo(pet, "thinking", "");
-      pet.currentThinking.textContent += ev.text;
+      if (!pet.currentThinking) pet.currentThinking = addMsgTo(pet, "thinking md", "");
+      pet.currentThinking.dataset.raw = (pet.currentThinking.dataset.raw ?? "") + ev.text;
+      renderMarkdown(pet.currentThinking, pet.currentThinking.dataset.raw);
       if (pet.id === selected) scrollToBottom();
       break;
     }
