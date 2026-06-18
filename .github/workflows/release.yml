@@ -84,6 +84,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (set these as repo secrets). The private key signs the
+          # update artifacts; the matching public key is in tauri.conf.json.
+          # Password is empty for this key, so the PASSWORD secret can be unset.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # __VERSION__ is read from src-tauri/tauri.conf.json. Pushing main with an
           # unchanged version updates the same release; bump the version to cut a new one.

@@ -615,6 +615,13 @@ body {
   margin-bottom: 9px;
   font-size: 12.5px;
 }
+#permission-bar .perm-target {
+  margin: -4px 0 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.75;
+  word-break: break-all;
+}
 #permission-bar .perm-buttons {
   display: flex;
   flex-wrap: wrap;

@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, HttpHeader, ImageContent, InitializeRequest, McpServer,
-    McpServerHttp, ModelId, NewSessionRequest, PromptRequest, ProtocolVersion,
+    McpServerHttp, ModelId, NewSessionRequest, PermissionOptionId, PromptRequest, ProtocolVersion,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification, SetSessionModeRequest,
     SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -130,6 +130,8 @@ pub fn start(
         let app_perm = app.clone();
         let app_main = app.clone();
         let pending_perm = pending.clone();
+        let db_perm = db.clone();
+        let cur_id_perm = current_db_id.clone();
         let db_notif = db.clone();
         let db_main = db.clone();
         let cur_id_notif = current_db_id.clone();
@@ -170,11 +172,30 @@ pub fn start(
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("perm-{}", PERM_COUNTER.fetch_add(1, Ordering::Relaxed)));
                     let title = permission_title(&request);
+                    let kind = perm_tool_kind(&rv);
+                    let target = perm_target(&rv);
                     let options_json: Vec<serde_json::Value> = request
                         .options
                         .iter()
                         .map(|o| serde_json::to_value(o).unwrap_or(serde_json::Value::Null))
                         .collect();
+
+                    // Policy: only read-only tools (read/search) may be auto-approved,
+                    // and only when the user enabled it for this instance. Everything
+                    // else (edit/execute/delete/move/fetch/…) always prompts —
+                    // deny-until-approved is the default. Every decision is audited.
+                    let auto_reads = app_perm
+                        .try_state::<crate::acp::AcpManager>()
+                        .map(|m| m.auto_allow_reads_for(&iid_perm))
+                        .unwrap_or(false);
+                    if auto_reads && kind.as_deref().map(is_read_kind).unwrap_or(false) {
+                        if let Some(id) = pick_allow_option(&request) {
+                            log_permission(&db_perm, &cur_id_perm, &title, kind.as_deref(), target.as_deref(), "auto_allow_read", true).await;
+                            return responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
+                            ));
+                        }
+                    }
 
                     let (tx, rx) = oneshot::channel::<String>();
                     if let Ok(mut m) = pending_perm.lock() {
@@ -182,7 +203,8 @@ pub fn start(
                     }
                     emit_state(&app_perm, &iid_perm, "permission", Some(title.clone()));
                     let _ = app_perm.emit(PERMISSION_EVENT, json!({
-                        "instance_id": iid_perm, "request_id": request_id, "title": title, "options": options_json,
+                        "instance_id": iid_perm, "request_id": request_id, "title": title,
+                        "tool_kind": kind, "target": target, "options": options_json,
                     }));
 
                     let chosen = rx.await.ok();
@@ -196,6 +218,7 @@ pub fn start(
                                 .unwrap_or(false)
                         }).map(|o| o.option_id.clone())
                     });
+                    log_permission(&db_perm, &cur_id_perm, &title, kind.as_deref(), target.as_deref(), chosen.as_deref().unwrap_or("cancelled"), false).await;
                     match typed {
                         Some(id) => responder.respond(RequestPermissionResponse::new(
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
@@ -671,6 +694,71 @@ fn permission_title(request: &RequestPermissionRequest) -> String {
             v.get("toolCall").and_then(|t| t.get("title")).and_then(|t| t.as_str()).map(str::to_string)
         })
         .unwrap_or_else(|| "Permission requested".into())
+}
+
+/// Tool kinds safe to auto-approve: non-mutating and non-exfiltrating. `fetch`
+/// (network) is deliberately excluded — it can pull untrusted data / exfiltrate.
+fn is_read_kind(kind: &str) -> bool {
+    matches!(kind, "read" | "search")
+}
+
+/// The tool kind (read/edit/execute/…) from a permission request, if present.
+fn perm_tool_kind(rv: &serde_json::Value) -> Option<String> {
+    rv.get("toolCall").and_then(|t| t.get("kind")).and_then(|k| k.as_str()).map(String::from)
+}
+
+/// A representative target (first touched path) for the prompt + audit log.
+fn perm_target(rv: &serde_json::Value) -> Option<String> {
+    let tc = rv.get("toolCall")?;
+    if let Some(p) = tc
+        .get("locations")
+        .and_then(|l| l.as_array())
+        .and_then(|a| a.first())
+        .and_then(|x| x.get("path"))
+        .and_then(|p| p.as_str())
+    {
+        return Some(p.to_string());
+    }
+    tc.get("rawInput").and_then(|r| r.get("file_path")).and_then(|p| p.as_str()).map(String::from)
+}
+
+/// The least-privilege "allow" option for an auto-approval: prefer `allow_once`,
+/// else any `allow*` kind. None if the agent offered no allow option.
+fn pick_allow_option(request: &RequestPermissionRequest) -> Option<PermissionOptionId> {
+    let mut fallback = None;
+    for o in &request.options {
+        let Some(kind) = serde_json::to_value(o)
+            .ok()
+            .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(String::from))
+        else {
+            continue;
+        };
+        if kind == "allow_once" {
+            return Some(o.option_id.clone()); // least privilege
+        }
+        if kind.starts_with("allow") && fallback.is_none() {
+            fallback = Some(o.option_id.clone());
+        }
+    }
+    fallback
+}
+
+/// Append a permission decision to the session's audit trail.
+async fn log_permission(
+    db: &Db,
+    cur_id_state: &Arc<Mutex<Option<String>>>,
+    title: &str,
+    kind: Option<&str>,
+    target: Option<&str>,
+    decision: &str,
+    auto: bool,
+) {
+    if let Some(sid) = cur_id(cur_id_state) {
+        let payload = json!({
+            "title": title, "kind": kind, "target": target, "decision": decision, "auto": auto,
+        });
+        let _ = db.append_event(&sid, "permission", &payload.to_string()).await;
+    }
 }
 
 fn set_status(status: &Arc<Mutex<AcpStatus>>, new: AcpStatus) {

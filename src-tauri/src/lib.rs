@@ -169,6 +169,12 @@ fn respond_permission(instance: String, id: String, choice: String, state: tauri
     state.respond_permission(&instance, id, choice);
 }
 
+/// Toggle "auto-approve read-only tools" for an instance (off by default).
+#[tauri::command]
+fn set_auto_allow_reads(instance: String, on: bool, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
+    state.set_auto_allow_reads(&instance, on)
+}
+
 #[tauri::command]
 fn new_session(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Result<(), String> {
     state.new_session(&instance)
@@ -237,6 +243,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             list_instances,
             list_types,
@@ -256,6 +263,7 @@ pub fn run() {
             is_git_repo,
             run_handoff,
             respond_permission,
+            set_auto_allow_reads,
             new_session,
             resume_session,
             get_agent_config,
@@ -268,6 +276,11 @@ pub fn run() {
             set_dragging
         ])
         .setup(|app| {
+            // In-app auto-update (desktop only). The frontend triggers the check
+            // via the updater plugin; this just registers it.
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+
             let window = app
                 .get_webview_window("main")
                 .expect("main window should exist");

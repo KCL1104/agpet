@@ -157,6 +157,10 @@ struct Instance {
     /// True while this instance is mid-turn — `delegate` refuses busy targets to
     /// avoid deadlocking (e.g. the orchestrating "mother", or a delegation cycle).
     busy: Arc<AtomicBool>,
+    /// Permission policy: when true, read-only tool calls (read/search) are
+    /// auto-approved; everything else still prompts. Default false
+    /// (deny-until-approved); resets each launch so it's never silently sticky.
+    auto_allow_reads: Arc<AtomicBool>,
 }
 
 pub struct AcpManager {
@@ -378,6 +382,7 @@ impl AcpManager {
             config: cfg.clone(),
             task: None,
             busy: busy.clone(),
+            auto_allow_reads: Arc::new(AtomicBool::new(false)),
         });
 
         let log_path = self.log_dir.join(format!("acp-messages-{}.jsonl", s.instance_id));
@@ -597,6 +602,26 @@ impl AcpManager {
                 let _ = db.set_pet_position(&pet_id, last_x, custom_y).await;
             });
         }
+        Ok(())
+    }
+
+    /// Whether read-only tool calls are auto-approved for this instance.
+    pub fn auto_allow_reads_for(&self, instance_id: &str) -> bool {
+        self.instances
+            .lock()
+            .ok()
+            .and_then(|insts| insts.iter().find(|i| i.instance_id == instance_id).map(|i| i.auto_allow_reads.load(Ordering::SeqCst)))
+            .unwrap_or(false)
+    }
+
+    /// Toggle the read-only auto-approve policy for one instance.
+    pub fn set_auto_allow_reads(&self, instance_id: &str, on: bool) -> Result<(), String> {
+        let insts = self.instances.lock().map_err(|_| "lock poisoned".to_string())?;
+        let inst = insts
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .ok_or_else(|| format!("unknown instance: {instance_id}"))?;
+        inst.auto_allow_reads.store(on, Ordering::SeqCst);
         Ok(())
     }
 

@@ -7,6 +7,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
@@ -60,10 +62,11 @@ interface Pet {
   toolChips: Map<string, HTMLDivElement>;
   cfg: any; // agent-config: auth_methods / models / modes
   pendingPerm: PermissionRequest | null; // unanswered permission request, if any
+  autoAllowReads: boolean; // permission policy: auto-approve read/search tools
 }
 
 interface PermissionOption { optionId: string; name: string; kind: string; }
-interface PermissionRequest { instance_id: string; request_id: string; title: string; options: PermissionOption[]; }
+interface PermissionRequest { instance_id: string; request_id: string; title: string; tool_kind?: string | null; target?: string | null; options: PermissionOption[]; }
 
 const pets: Pet[] = [];
 const petById = new Map<string, Pet>();
@@ -110,6 +113,7 @@ const setModelSel = document.getElementById("set-model") as HTMLSelectElement;
 const setModeSel = document.getElementById("set-mode") as HTMLSelectElement;
 const setFontSeg = document.getElementById("set-font") as HTMLDivElement;
 const setDensitySeg = document.getElementById("set-density") as HTMLDivElement;
+const setAutoReads = document.getElementById("set-auto-reads") as HTMLInputElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 const resizeHandle = document.getElementById("resize-handle") as HTMLDivElement;
 const headerEl = document.querySelector(".chat-header") as HTMLDivElement;
@@ -381,7 +385,15 @@ function populateSettings(pet: Pet) {
       setModeSel.appendChild(o);
     }
   }
+  setAutoReads.checked = pet.autoAllowReads;
 }
+
+setAutoReads.addEventListener("change", () => {
+  const pet = selectedPet();
+  if (!pet) return;
+  pet.autoAllowReads = setAutoReads.checked;
+  invoke("set_auto_allow_reads", { instance: pet.id, on: pet.autoAllowReads }).catch(() => {});
+});
 
 settingsBtn.addEventListener("click", () => {
   const pet = selectedPet();
@@ -597,8 +609,15 @@ function renderPermBar(pet: Pet | undefined) {
   }
   const t = document.createElement("div");
   t.className = "perm-title";
-  t.textContent = `${pet.name} — allow: ${req.title}?`;
+  const kindLabel = req.tool_kind ? `[${req.tool_kind}] ` : "";
+  t.textContent = `${pet.name} — allow ${kindLabel}${req.title}?`;
   permBar.appendChild(t);
+  if (req.target) {
+    const tgt = document.createElement("div");
+    tgt.className = "perm-target";
+    tgt.textContent = req.target;
+    permBar.appendChild(tgt);
+  }
   const btnRow = document.createElement("div");
   btnRow.className = "perm-buttons";
   for (const opt of req.options ?? []) {
@@ -1148,6 +1167,7 @@ function addPet(info: InstanceInfo) {
     toolChips: new Map(),
     cfg: null,
     pendingPerm: null,
+    autoAllowReads: false, // safe default; off each launch
   };
   importLegacyState(pet); // one-time migration of pre-keystone localStorage state
   pets.push(pet);
@@ -1775,6 +1795,22 @@ async function init() {
     for (const inst of instances) addPet(inst);
   } catch (e) {
     console.error("list_instances failed", e);
+  }
+  checkForUpdates(); // fire-and-forget; silently no-ops in dev / offline / up-to-date
+}
+
+// Check GitHub Releases for a newer signed build; download, install, relaunch.
+// Wrapped so any failure (dev build, offline, no update) never disrupts the app.
+async function checkForUpdates() {
+  try {
+    const update = await checkUpdate();
+    if (update) {
+      showToast(`Updating to v${update.version}…`);
+      await update.downloadAndInstall();
+      await relaunch();
+    }
+  } catch (e) {
+    console.error("update check failed", e);
   }
 }
 

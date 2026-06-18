@@ -300,3 +300,17 @@ prompt 內有 `//標註` → send 時跳 **平行 / 垂直 / 廣播** 選單；�
 - **待目視**：母 agent 仍能呼叫 `delegate`（帶 token 通過）；外部無 token 請求被 401 擋下。
 
 > 接手提示更新：身分現在 **pet_id（持久 UUID）vs instance_id（每次啟動的臨時計數）** 兩層；companion 以 (type,workdir) 認；worker 記 parent_pet_id。下一步 backlog：M0 其餘（釘選 npx adapter 版本、CSP、權限 default-deny、CI 測試 gate、簽章、updater）、M1 收尾（session 連 pet_id）、再進 M2/M3。
+
+## 🔒 M0 信任地基（2026-06-18，分支 feat/m0-trust-floor）
+
+把 agpet 推向「可信賴公開發布」的 M0 批次。除了「簽章/notarize」（需使用者憑證）外全部做完，本機 `clippy -D warnings` / `cargo test`(11) / `tsc` / `vite build` 全綠，待目視。
+
+- **供應鏈**：npx adapter 從 `@latest` 釘成 exact 版（`config.rs` 常數 `CLAUDE_ADAPTER`=`@…/claude-agent-acp@0.47.0`、`CODEX_ADAPTER`=`@zed-industries/codex-acp@0.16.0`），開機不再自動執行任意新版上游；使用者可在 agents.toml 覆寫。
+- **CSP**：`tauri.conf.json` 的 `csp` 從 `null` → 真實 policy（`script-src 'self'` 擋注入腳本，style/img 放寬保住 markdown）。
+- **依賴健康**：封存的 `serde_yaml` → 維護中的 `serde_yaml_ng`（drop-in；`.yaml` 照常）。
+- **CI 測試 gate**：新增 `.github/workflows/ci.yml`（clippy `-D warnings` + cargo test + tsc + vite build，跑在 PR/非-main push，fmt 為 non-blocking）；`release.yml` 加 `check` job 把關 + `release: needs: check`——**壞掉的 main 無法發 release**。
+- **第一批測試**（11 個，新 `#[cfg(test)]`）：`git.rs` path_slug、`config.rs` WSL 路徑/shell 引號/adapter 釘選斷言、`workflow.rs` 樣板代入/型別推導/builtin、`db.rs` migration 到 v2 + 冪等 + **「重 upsert 身分不洗掉 xp/level」的 keystone 保證** + worker 不入 companion 清單。`Cargo.toml` 加 `[dev-dependencies] tokio rt+macros`。
+- **auto-update（updater）**：`tauri-plugin-updater` + `tauri-plugin-process`；`lib.rs` `#[cfg(desktop)]` 註冊 updater + process plugin；`tauri.conf.json` 加 `bundle.createUpdaterArtifacts:true` + `plugins.updater{pubkey,endpoints→GitHub Releases latest.json}`；`capabilities` 加 `updater:default`/`process:allow-restart`；`release.yml` 帶 `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` secret；前端 `main.ts` 啟動時 `checkForUpdates()`（download+install+relaunch，失敗/離線/dev 靜默）。⚠️ **私鑰存於 repo 外 `C:\Users\USER\agpet-updater.key`，需手動加成 GitHub secret 後下次 release 才會簽**（沒加 secret 而 createUpdaterArtifacts=true → release 建置會失敗）。
+- **權限政策層（default-deny + 稽核）**：`client.rs` 權限 handler 擷取 `tool_kind` + `target`、**所有決策寫 DB 稽核**（`session_events` event_type=`permission`，含 auto 旗標）；**唯讀工具（read/search）可選擇性自動核可**（`auto_allow_reads` per-instance，預設 off、每次啟動歸零；其餘 edit/execute/delete/fetch 永遠 prompt）。`mod.rs` `Instance.auto_allow_reads` + `auto_allow_reads_for`/`set_auto_allow_reads`；`lib.rs` `set_auto_allow_reads` command；前端設定面板加勾選框、權限列顯示 kind+target。
+
+> M0 剩餘：**簽章/notarize**（待使用者辦 Apple Developer + Windows Authenticode 憑證，我再補 `tauri.conf.json`+`release.yml` 接線）。next：M1 收尾（session 連 pet_id）、M2/M3。
