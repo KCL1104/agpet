@@ -276,3 +276,27 @@ prompt 內有 `//標註` → send 時跳 **平行 / 垂直 / 廣播** 選單；�
 ## 更後面（暫不做）
 - M4：跨機器團隊（feature B，spec 標延後/可能不做）。
 - `sysinfo`/WSL 外部 session 偵測（M1 步驟 5–6，當初列為可選）。
+
+## 🏗️ Production+桌寵化路線圖啟動（2026-06-18）
+
+接手新方向：把 agpet 從「多 agent 編排 demo」推成「**可信賴的 production 工具 + 保留並擴充桌寵遊戲（餵養/升級/XP）**」。先做 8-agent 稽核（結果與可重跑的 workflow 存於 `.claude/agpet-audit.workflow.js`），與使用者敲定四個方向：**地基優先**、**XP 成果導向且純裝飾**、**前端拆模組+薄 store**、**精選穩定+中性品牌**。Milestone：M0 信任地基 / M1 身分基石 / M2 體驗+架構 / M3 純裝飾遊戲層 / M4 重構+法務。
+
+### Slice A（M1 身分基石，keystone）✅ 完成（`cargo check`+`tsc`+`vite build` 通過，待目視）
+
+**問題**：寵物身分原本只是記憶體計數器 `next_n`（`mod.rs`，`claude-1` 每次重開歸零）+ 前端 localStorage（`agpet.pos/name.<instance_id>`），換資料夾/啟動順序就張冠李戴；且毫無遊戲屬性可掛。
+
+- **DB migration 機制**（`db.rs`）：改用 `PRAGMA user_version` 有序冪等 stepper。v1 = 原 sessions 三表（冪等、可「收編」既有無版號 DB）；v2 = `pets` + `xp_events`。
+- **`pets` 表**：`pet_id`(UUID,PK) + `type_id`/`workdir`/`kind`('companion'|'worker')/`parent_pet_id` + 身分(`display_name`/`handle`/`color`/`last_x`/`custom_y`) + **遊戲欄位先建好**(`xp`/`level`/`hunger`/`energy`/`happiness`/`last_fed_at`/`last_decay_at`) + 預埋同步(`owner_id`/`device_id`)。`xp_events` 為**不可變 ledger**（與可刪除的 session 內容分離 → 刪對話不丟等級）。
+- **Companion vs Worker**（`acp/mod.rs`）：`Instance` 加 `pet_id`/`kind`/`handle`/`custom_y`/`last_x`。**Companion** 以 `(type_id, workdir)` 為鍵、跨重啟穩定，啟動時從記憶體 `companions` map（開機由 `db.list_companions()` 灌入）同步解析、首見即建立並 write-behind 持久化。**Worker**（`delegate`/workflow 臨時生）走新 `launch_worker(type, cwd, parent_pet_id)`，不進 map、`kind='worker'` 記 parent，供日後 XP 歸功母寵物（避免 fan-out 刷 XP）。`launch`/`launch_worker` 共用 `spawn_resolved(Spawn{...})`。
+- **持久化**：`rename`（加 `handle` 參數）與新 `set_pet_position` 都同步更新 instance + 記憶體 map + write-behind 寫 DB（僅 companion）。`InstanceInfo`/`instance-added` 帶 `pet_id`/`handle`/`custom_y`/`last_x`。
+- **前端**（`main.ts`）：`Pet` 加 `petId`；`addPet` 改用後端身分/位置；新增 `importLegacyState()` **一次性**把舊 localStorage 名稱/位置匯入後端 pet 並刪鍵（之後後端為唯一真相）。拖曳/雙擊重設改呼叫 `set_pet_position`，改名改呼叫 `rename_instance(name, handle)`。`lib.rs` 註冊 `set_pet_position`。
+- **待目視**：拖寵物→重開 app→位置/高度/名字保留；換不同資料夾的同型 agent 各自獨立身分不互蓋；舊 localStorage 自動遷移一次。**XP 尚未發放**（屬 M3；表/身分已就緒）。
+
+### Slice B（M0 安全：MCP 認證）✅ 完成（編譯通過，待目視）
+
+堵掉先前自承的「localhost MCP 無 token = 本機 RCE」缺口。
+- **`mcp.rs`**：`start()` 改回傳 `(url, token)`（per-run UUID bearer token）；axum `from_fn` middleware `auth_guard` 檢查 **Host 為 loopback**（防 DNS-rebinding）+ **`Authorization: Bearer <token>`**，否則 401。
+- **接線**：`lib.rs` 存 `mcp: Option<(String,String)>` 給 `AcpManager`；`client.rs` `session/new` 帶 MCP server 時附 `HttpHeader::new("Authorization", "Bearer …")`（`McpServerHttp::new(..).headers(..)`）。
+- **待目視**：母 agent 仍能呼叫 `delegate`（帶 token 通過）；外部無 token 請求被 401 擋下。
+
+> 接手提示更新：身分現在 **pet_id（持久 UUID）vs instance_id（每次啟動的臨時計數）** 兩層；companion 以 (type,workdir) 認；worker 記 parent_pet_id。下一步 backlog：M0 其餘（釘選 npx adapter 版本、CSP、權限 default-deny、CI 測試 gate、簽章、updater）、M1 收尾（session 連 pet_id）、再進 M2/M3。

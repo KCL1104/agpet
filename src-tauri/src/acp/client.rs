@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, ImageContent, InitializeRequest, McpServer, McpServerHttp,
-    ModelId, NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome,
-    SessionId, SessionModeId, SessionNotification, SetSessionModeRequest, SetSessionModelRequest,
-    TextContent,
+    CancelNotification, ContentBlock, HttpHeader, ImageContent, InitializeRequest, McpServer,
+    McpServerHttp, ModelId, NewSessionRequest, PromptRequest, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
+    SelectedPermissionOutcome, SessionId, SessionModeId, SessionNotification, SetSessionModeRequest,
+    SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use serde_json::json;
@@ -72,7 +72,9 @@ pub fn start(
     db: Arc<Db>,
     agent_cfg: Arc<Mutex<serde_json::Value>>,
     busy: Arc<AtomicBool>,
-    mcp_url: Option<String>,
+    // agpet's MCP delegate server as (url, bearer token), attached to sessions
+    // that support HTTP MCP. The token authenticates this client to the server.
+    mcp: Option<(String, String)>,
 ) -> Option<tauri::async_runtime::JoinHandle<()>> {
     if std::env::var_os("CLAUDECODE").is_some() {
         std::env::remove_var("CLAUDECODE");
@@ -231,7 +233,7 @@ pub fn start(
                 // session/new — attach agpet's MCP delegate server if the agent
                 // supports HTTP MCP (so it gets the `delegate`/`list_agents` tools).
                 let mut new_req = NewSessionRequest::new(cwd_main.clone());
-                if let Some(url) = &mcp_url {
+                if let Some((url, token)) = &mcp {
                     let http_ok = init_json
                         .get("agentCapabilities")
                         .and_then(|c| c.get("mcpCapabilities"))
@@ -239,7 +241,12 @@ pub fn start(
                         .and_then(|h| h.as_bool())
                         .unwrap_or(false);
                     if http_ok {
-                        new_req = new_req.mcp_servers(vec![McpServer::Http(McpServerHttp::new("agpet", url.clone()))]);
+                        // Authenticate to agpet's loopback MCP server with the per-run
+                        // bearer token so only our agents can reach the delegate tool.
+                        new_req = new_req.mcp_servers(vec![McpServer::Http(
+                            McpServerHttp::new("agpet", url.clone())
+                                .headers(vec![HttpHeader::new("Authorization", format!("Bearer {token}"))]),
+                        )]);
                     } else {
                         tracing::info!("[{iid_main}] agent has no http MCP capability; delegate tool unavailable");
                     }

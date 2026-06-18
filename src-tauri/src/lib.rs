@@ -54,17 +54,30 @@ fn retry_agent(instance: String, state: tauri::State<'_, acp::AcpManager>) -> Re
     state.retry(&instance)
 }
 
-/// Rename an instance (so delegate/tray see the friendly name).
+/// Rename an instance (so delegate/tray see the friendly name); persists the
+/// name + mention handle to the pet for companions.
 #[tauri::command]
 fn rename_instance(
     instance: String,
     name: String,
+    handle: String,
     state: tauri::State<'_, acp::AcpManager>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    state.rename(&instance, name)?;
+    state.rename(&instance, name, handle)?;
     tray::refresh(&app);
     Ok(())
+}
+
+/// Persist a pet's dropped position / roaming height (companions only).
+#[tauri::command]
+fn set_pet_position(
+    instance: String,
+    x: Option<f64>,
+    custom_y: f64,
+    state: tauri::State<'_, acp::AcpManager>,
+) -> Result<(), String> {
+    state.set_pet_position(&instance, x, custom_y)
 }
 
 #[tauri::command]
@@ -231,6 +244,7 @@ pub fn run() {
             close_instance,
             retry_agent,
             rename_instance,
+            set_pet_position,
             send_prompt,
             list_dir_files,
             cancel_prompt,
@@ -272,21 +286,26 @@ pub fn run() {
             acp::logging::init();
             let setup: anyhow::Result<()> = (|| {
                 let db_path = app.path().app_data_dir()?.join("agpet.db");
-                let database = tauri::async_runtime::block_on(db::Db::init(&db_path))?;
+                let database = std::sync::Arc::new(tauri::async_runtime::block_on(db::Db::init(&db_path))?);
                 tracing::info!("session DB: {}", db_path.display());
                 let config = acp::AgentsConfig::load(app.handle())?;
                 tracing::info!("loaded {} agent type(s)", config.agents.len());
-                // Start agpet's MCP delegate server first so its URL can be
-                // attached to each agent session.
-                let mcp_url = match mcp::start(app.handle().clone()) {
-                    Ok(url) => { tracing::info!("MCP delegate server: {url}"); Some(url) }
+                // Prime the durable pet identities so launched companions restore
+                // their name/position/stats synchronously.
+                let companions = tauri::async_runtime::block_on(database.list_companions()).unwrap_or_default();
+                tracing::info!("loaded {} companion pet(s)", companions.len());
+                // Start agpet's MCP delegate server first so its (url, token) can
+                // be attached to each agent session.
+                let mcp = match mcp::start(app.handle().clone()) {
+                    Ok((url, token)) => { tracing::info!("MCP delegate server: {url}"); Some((url, token)) }
                     Err(e) => { tracing::error!("MCP server failed to start: {e:#}"); None }
                 };
                 let manager = acp::AcpManager::new(
-                    std::sync::Arc::new(database),
+                    database,
                     &config,
                     app.handle().clone(),
-                    mcp_url,
+                    mcp,
+                    companions,
                 );
                 // Start with an empty desktop; the user launches instances (with a
                 // working dir) from the launcher panel via the tray.

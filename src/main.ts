@@ -31,13 +31,18 @@ let last = performance.now();
 
 interface InstanceInfo {
   instance_id: string;
+  pet_id: string; // stable identity (UUID) — survives restarts
   type_id: string;
   name: string;
+  handle: string;
   color: string;
+  custom_y: number; // persisted roaming height (-1 = default)
+  last_x: number | null; // persisted drop x
 }
 
 interface Pet {
-  id: string; // instance_id
+  id: string; // instance_id (ephemeral, per-launch)
+  petId: string; // stable pet identity (UUID); anchors name/position/stats
   type: string; // type_id (e.g. claude) — used to spawn worktree workers
   name: string;
   handle: string; // space-free slug for // mentions (default = id)
@@ -549,8 +554,8 @@ function renamePet(pet: Pet, raw: string) {
   let h = slug(name) || pet.id;
   if (pets.some((p) => p.id !== pet.id && p.handle === h)) h = `${h}-${pet.id}`; // keep unique
   pet.handle = h;
-  localStorage.setItem("agpet.name." + pet.id, JSON.stringify({ name: pet.name, handle: pet.handle }));
-  invoke("rename_instance", { instance: pet.id, name: pet.name }).catch(() => {}); // so delegate/tray resolve it
+  // Backend persists name + handle to the pet record (and delegate/tray resolve it).
+  invoke("rename_instance", { instance: pet.id, name: pet.name, handle: pet.handle }).catch(() => {});
   if (pet.id === selected) refreshHeader();
 }
 
@@ -1123,12 +1128,15 @@ function addPet(info: InstanceInfo) {
   messagesHost.appendChild(container);
   const pet: Pet = {
     id: info.instance_id,
+    petId: info.pet_id,
     type: info.type_id,
     name: info.name,
-    handle: info.instance_id, // default mention handle = id; rename overrides
+    handle: info.handle || info.instance_id, // backend-persisted handle; default = id
     color: info.color,
-    x: -1, // assigned by layoutPets
-    customY: -1, // roaming height; -1 = default baseline, set by dragging
+    // Position/height are backend-owned now (the pet record); -1 / null mean
+    // "not set" → layoutPets assigns / default baseline.
+    x: typeof info.last_x === "number" ? info.last_x : -1,
+    customY: typeof info.custom_y === "number" ? info.custom_y : -1,
     dir: pets.length % 2 === 0 ? 1 : -1,
     state: "connecting",
     detail: "",
@@ -1141,29 +1149,43 @@ function addPet(info: InstanceInfo) {
     cfg: null,
     pendingPerm: null,
   };
-  // Restore a dropped position from a previous run, if any. Instance ids are
-  // deterministic across restarts (the counter resets), so this is best-effort
-  // keyed by id; clamp in case the screen is now narrower.
-  const savedPos = localStorage.getItem("agpet.pos." + pet.id);
-  if (savedPos) {
-    try {
-      const { y } = JSON.parse(savedPos);
-      if (typeof y === "number") pet.customY = y; // walk at the saved height
-    } catch {}
-  }
-  // Restore a custom name from a previous run (same best-effort id keying).
-  const savedName = localStorage.getItem("agpet.name." + pet.id);
-  if (savedName) {
-    try {
-      const { name, handle } = JSON.parse(savedName);
-      if (name) { pet.name = name; invoke("rename_instance", { instance: pet.id, name }).catch(() => {}); }
-      if (handle) pet.handle = handle;
-    } catch {}
-  }
+  importLegacyState(pet); // one-time migration of pre-keystone localStorage state
   pets.push(pet);
   petById.set(pet.id, pet);
   layoutPets();
   if (!selected) selected = pet.id;
+}
+
+// One-time migration: before the backend owned pet identity, name/position were
+// kept in localStorage keyed by the (reused) instance id. If the backend has no
+// persisted state yet, import the legacy values into the pet record, then drop
+// the localStorage keys so the backend becomes the single source of truth.
+function importLegacyState(pet: Pet) {
+  if (pet.customY < 0 && pet.x < 0) {
+    const savedPos = localStorage.getItem("agpet.pos." + pet.id);
+    if (savedPos) {
+      try {
+        const { y } = JSON.parse(savedPos);
+        if (typeof y === "number") {
+          pet.customY = y;
+          invoke("set_pet_position", { instance: pet.id, x: null, customY: y }).catch(() => {});
+        }
+      } catch {}
+      localStorage.removeItem("agpet.pos." + pet.id);
+    }
+  }
+  const savedName = localStorage.getItem("agpet.name." + pet.id);
+  if (savedName) {
+    try {
+      const { name, handle } = JSON.parse(savedName);
+      if (name) {
+        pet.name = name;
+        pet.handle = handle || pet.handle;
+        invoke("rename_instance", { instance: pet.id, name, handle: pet.handle }).catch(() => {});
+      }
+    } catch {}
+    localStorage.removeItem("agpet.name." + pet.id);
+  }
 }
 
 function removePet(id: string) {
@@ -1650,7 +1672,8 @@ window.addEventListener("mouseup", () => {
   drag = null;
   invoke("set_dragging", { dragging: false }).catch(() => {});
   if (moved) {
-    localStorage.setItem("agpet.pos." + pet.id, JSON.stringify({ y: pet.customY })); // remember the walking height
+    // Persist the dropped position + walking height to the pet record.
+    invoke("set_pet_position", { instance: pet.id, x: pet.x, customY: pet.customY }).catch(() => {});
   } else {
     openPanelFor(pet.id); // a click, not a drag
   }
@@ -1663,7 +1686,7 @@ canvas.addEventListener("dblclick", (e) => {
     if (e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
       if (pet.customY >= 0) {
         pet.customY = -1;
-        localStorage.removeItem("agpet.pos." + pet.id);
+        invoke("set_pet_position", { instance: pet.id, x: null, customY: -1 }).catch(() => {});
         showToast(`${pet.name} back to default height`);
       }
       return;

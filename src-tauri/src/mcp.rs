@@ -14,6 +14,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 
+use axum::response::IntoResponse;
+
 use crate::acp::AcpManager;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -94,25 +96,69 @@ impl DelegateServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DelegateServer {}
 
-/// Start the MCP HTTP server on 127.0.0.1 (random port). Returns the URL agents
-/// connect to (…/mcp). The `app` handle lets tools reach the `AcpManager`.
-pub fn start(app: AppHandle) -> anyhow::Result<String> {
+/// Start the MCP HTTP server on 127.0.0.1 (random port). Returns `(url, token)`:
+/// the URL agents connect to (…/mcp) and the per-run bearer token that
+/// authenticates them. The `app` handle lets tools reach the `AcpManager`.
+///
+/// The server is gated by [`auth_guard`] so a random local process (or a
+/// DNS-rebinding browser tab) can't drive `delegate`/`list_agents` against the
+/// user's logged-in agents — only callers presenting the token over loopback get
+/// through.
+pub fn start(app: AppHandle) -> anyhow::Result<(String, String)> {
     let listener =
         tauri::async_runtime::block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })?;
     let addr = listener.local_addr()?;
     let url = format!("http://{addr}/mcp");
+    let token = uuid::Uuid::new_v4().to_string();
+
     let app_for_factory = app.clone();
     let service = StreamableHttpService::new(
         move || Ok(DelegateServer::new(app_for_factory.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let auth_token = token.clone();
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let token = auth_token.clone();
+            async move { auth_guard(token, req, next).await }
+        }));
     tauri::async_runtime::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             tracing::error!("MCP server stopped: {e}");
         }
     });
-    tracing::info!("MCP delegate server at {url}");
-    Ok(url)
+    tracing::info!("MCP delegate server at {url} (token-gated)");
+    Ok((url, token))
+}
+
+/// Reject any request not coming over loopback (Host header) and not bearing the
+/// per-run token. Blocks other local processes and browser-based DNS-rebinding
+/// from reaching the delegate tools.
+async fn auth_guard(
+    token: String,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::{AUTHORIZATION, HOST};
+    let headers = req.headers();
+    let host_ok = headers
+        .get(HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            let host = h.rsplit_once(':').map(|(host, _)| host).unwrap_or(h);
+            host == "127.0.0.1" || host == "localhost" || host == "[::1]"
+        })
+        .unwrap_or(false);
+    let auth_ok = headers
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| h == format!("Bearer {token}"))
+        .unwrap_or(false);
+    if host_ok && auth_ok {
+        next.run(req).await
+    } else {
+        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
 }
