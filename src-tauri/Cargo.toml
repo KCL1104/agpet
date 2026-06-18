@@ -39,13 +39,19 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 
-# User-editable workflows (M3 Slice 2b). serde_yaml is archived but stable.
-serde_yaml = "0.9"
-
 # Inter-agent orchestration: agpet runs an MCP server exposing a `delegate` tool
 # that agents (esp. the "mother") can call. rmcp is already in the tree via ACP.
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 schemars = "1"
 axum = "0.8"
 tokio-util = "0.7"
+
+# User-editable workflows (M3 Slice 2b). serde_yaml_ng is the maintained
+# continuation of the archived serde_yaml (drop-in API, same YAML format).
+serde_yaml_ng = "0.10.0"
+
+[dev-dependencies]
+# A standalone tokio runtime for async unit tests (the app itself drives async on
+# Tauri's runtime, so the normal build doesn't need `rt`).
+tokio = { version = "1", features = ["rt", "macros"] }
 

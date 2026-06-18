@@ -192,3 +192,16 @@ pub fn worktree_merge(repo: &Path, branch: &str) -> Result<String, String> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_slug_replaces_separators() {
+        assert_eq!(path_slug("agpet/delegate/claude-1"), "agpet-delegate-claude-1");
+        assert_eq!(path_slug("feature\\x"), "feature-x");
+        assert_eq!(path_slug("a:b"), "a-b");
+        assert_eq!(path_slug("plain"), "plain");
+    }
+}

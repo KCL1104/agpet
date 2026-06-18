@@ -52,6 +52,11 @@ pub enum AcpCommand {
 
 pub type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 
+/// A pending non-blocking delegation: the worker instance to auto-close once its
+/// result is collected (if it was a spawned worktree worker), and the receiver
+/// for that result.
+type PendingDelegation = (Option<String>, oneshot::Receiver<Result<String, String>>);
+
 /// State of one instance's connection.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -172,9 +177,8 @@ pub struct AcpManager {
     /// agpet's MCP server (delegate tool): (url, bearer token). Attached to
     /// sessions that support HTTP MCP. None if the server failed to start.
     mcp: Option<(String, String)>,
-    /// Pending non-blocking delegations: handle -> (worker instance to auto-close
-    /// once collected, if it was a spawned worktree worker; result receiver).
-    delegations: Mutex<HashMap<String, (Option<String>, oneshot::Receiver<Result<String, String>>)>>,
+    /// Pending non-blocking delegations, keyed by handle (see [`PendingDelegation`]).
+    delegations: Mutex<HashMap<String, PendingDelegation>>,
     delegation_seq: AtomicU64,
 }
 

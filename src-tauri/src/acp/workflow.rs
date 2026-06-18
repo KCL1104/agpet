@@ -104,7 +104,7 @@ pub fn load_all(app: &AppHandle) -> Vec<Workflow> {
                 continue;
             }
         };
-        match serde_yaml::from_str::<Workflow>(&txt) {
+        match serde_yaml_ng::from_str::<Workflow>(&txt) {
             Ok(mut wf) => {
                 if wf.required_types.is_empty() {
                     wf.required_types = distinct_types(&wf.steps);
@@ -317,4 +317,42 @@ pub fn run_handoff(
         }
         let _ = app.emit("workflow-done", json!({ "workflow_id": "adhoc", "ok": true }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitute_fills_both_placeholder_styles() {
+        let mut vars = HashMap::new();
+        vars.insert("user_input".to_string(), "build a CLI".to_string());
+        vars.insert("plan".to_string(), "1. do it".to_string());
+        let out = substitute("Task: {user_input} :: {{plan}}", &vars);
+        assert_eq!(out, "Task: build a CLI :: 1. do it");
+    }
+
+    #[test]
+    fn substitute_leaves_unknown_placeholders() {
+        let vars = HashMap::new();
+        assert_eq!(substitute("{missing}", &vars), "{missing}");
+    }
+
+    #[test]
+    fn distinct_types_preserves_first_seen_order_without_dupes() {
+        let steps = vec![
+            WorkflowStep { agent_type: "claude".into(), prompt: String::new(), output_var: "a".into() },
+            WorkflowStep { agent_type: "codex".into(), prompt: String::new(), output_var: "b".into() },
+            WorkflowStep { agent_type: "claude".into(), prompt: String::new(), output_var: "c".into() },
+        ];
+        assert_eq!(distinct_types(&steps), vec!["claude".to_string(), "codex".to_string()]);
+    }
+
+    #[test]
+    fn builtin_plan_then_execute_is_wellformed() {
+        let wf = builtins();
+        let pte = wf.iter().find(|w| w.id == "plan-then-execute").unwrap();
+        assert_eq!(pte.steps.len(), 3);
+        assert_eq!(pte.required_types, vec!["claude".to_string(), "codex".to_string()]);
+    }
 }

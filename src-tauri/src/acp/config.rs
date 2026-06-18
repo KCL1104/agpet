@@ -159,13 +159,21 @@ impl AgentsConfig {
     }
 }
 
+/// Pinned ACP adapter packages (exact versions). See the comment in
+/// [`default_agents`] for why these are pinned rather than `@latest`.
+const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.47.0";
+const CODEX_ADAPTER: &str = "@zed-industries/codex-acp@0.16.0";
+
 fn default_agents() -> Vec<AgentDef> {
     vec![
         AgentDef {
             id: "claude".into(),
             name: "Claude Code".into(),
             command: "npx".into(),
-            args: vec!["-y".into(), "@agentclientprotocol/claude-agent-acp".into()],
+            // Pinned (not @latest): npx -y runs whatever npm resolves at launch, so
+            // an unpinned name executes an arbitrary new upstream release on every
+            // cold start. Bump deliberately; users can override in agents.toml.
+            args: vec!["-y".into(), CLAUDE_ADAPTER.into()],
             color: "#da7756".into(),
             wsl: false,
             wsl_distro: None,
@@ -174,7 +182,7 @@ fn default_agents() -> Vec<AgentDef> {
             id: "codex".into(),
             name: "Codex".into(),
             command: "npx".into(),
-            args: vec!["-y".into(), "@zed-industries/codex-acp".into()],
+            args: vec!["-y".into(), CODEX_ADAPTER.into()],
             color: "#10a37f".into(),
             wsl: false,
             wsl_distro: None,
@@ -229,14 +237,16 @@ const DEFAULT_AGENTS_TOML: &str = r##"# agpet agents — one pet per agent. Edit
 id = "claude"
 name = "Claude Code"
 command = "npx"
-args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+# Pinned to an exact version (not @latest) so launches are deterministic and an
+# upstream release can't run automatically. Bump deliberately to update.
+args = ["-y", "@agentclientprotocol/claude-agent-acp@0.47.0"]
 color = "#da7756"
 
 [[agent]]
 id = "codex"
 name = "Codex"
 command = "npx"
-args = ["-y", "@zed-industries/codex-acp"]
+args = ["-y", "@zed-industries/codex-acp@0.16.0"]
 color = "#10a37f"
 
 [[agent]]
@@ -262,3 +272,40 @@ command = "gemini"
 args = ["--experimental-acp"]
 color = "#4e8cf5"
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn win_to_wsl_path_translates_drive_letters() {
+        // Forward-slash drive paths exercise the drive-letter → /mnt/<d> mapping.
+        assert_eq!(win_to_wsl_path(Path::new("C:/Users/me/proj")), "/mnt/c/Users/me/proj");
+        assert_eq!(win_to_wsl_path(Path::new("D:/data")), "/mnt/d/data");
+        // Already-POSIX paths pass through unchanged.
+        assert_eq!(win_to_wsl_path(Path::new("/home/me/x")), "/home/me/x");
+    }
+
+    #[test]
+    fn sh_quote_wraps_in_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("a b"), "'a b'");
+        // An embedded single quote is escaped; the result still parses as one
+        // shell word (begins and ends with a quote, longer than the input).
+        let q = sh_quote("a'b");
+        assert!(q.starts_with("'") && q.ends_with("'"));
+        assert!(q.len() > "a'b".len() + 2);
+    }
+
+    #[test]
+    fn default_agents_pin_adapter_versions() {
+        // The default claude/codex adapters must be pinned (contain '@<version>'),
+        // never resolving to @latest at launch.
+        let agents = default_agents();
+        let claude = agents.iter().find(|a| a.id == "claude").unwrap();
+        assert!(claude.args.last().unwrap().contains("@agentclientprotocol/claude-agent-acp@"));
+        let codex = agents.iter().find(|a| a.id == "codex").unwrap();
+        assert!(codex.args.last().unwrap().contains("@zed-industries/codex-acp@"));
+    }
+}

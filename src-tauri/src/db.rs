@@ -393,3 +393,67 @@ const MIGRATION_V2: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_xp_pet ON xp_events(pet_id)",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn tmp_db() -> (Db, std::path::PathBuf) {
+        let mut path = std::env::temp_dir();
+        let uniq = format!(
+            "agpet-test-{}-{}.db",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        path.push(uniq);
+        let _ = std::fs::remove_file(&path);
+        let db = Db::init(&path).await.expect("init db");
+        (db, path)
+    }
+
+    #[tokio::test]
+    async fn migrations_reach_version_2_and_are_idempotent() {
+        let (db, path) = tmp_db().await;
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&db.pool).await.unwrap();
+        assert_eq!(v, 2);
+        // Re-opening the same file must not error and must stay at v2.
+        let db2 = Db::init(&path).await.unwrap();
+        let v2: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&db2.pool).await.unwrap();
+        assert_eq!(v2, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn upsert_identity_preserves_game_columns() {
+        let (db, path) = tmp_db().await;
+        db.upsert_pet_identity("pet-1", "claude", Some("/repo"), "companion", None, Some("Bob"), Some("bob"), Some("#fff"), None, Some(-1.0))
+            .await
+            .unwrap();
+        // Earn XP / level out-of-band (as the future game layer will).
+        sqlx::query("UPDATE pets SET xp = 120, level = 3 WHERE pet_id = 'pet-1'").execute(&db.pool).await.unwrap();
+        // Re-upserting identity (relaunch with a new dropped position) must NOT
+        // reset progression — this is the keystone guarantee.
+        db.upsert_pet_identity("pet-1", "claude", Some("/repo"), "companion", None, Some("Bob"), Some("bob"), Some("#fff"), Some(42.0), Some(7.0))
+            .await
+            .unwrap();
+        let companions = db.list_companions().await.unwrap();
+        assert_eq!(companions.len(), 1);
+        let p = &companions[0];
+        assert_eq!(p.xp, 120, "xp must survive an identity re-upsert");
+        assert_eq!(p.level, 3);
+        assert_eq!(p.last_x, Some(42.0));
+        assert_eq!(p.custom_y, Some(7.0));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn list_companions_excludes_workers() {
+        let (db, path) = tmp_db().await;
+        db.upsert_pet_identity("c-1", "claude", Some("/repo"), "companion", None, None, None, None, None, None).await.unwrap();
+        db.upsert_pet_identity("w-1", "claude", Some("/repo"), "worker", Some("c-1"), None, None, None, None, None).await.unwrap();
+        let companions = db.list_companions().await.unwrap();
+        assert_eq!(companions.len(), 1);
+        assert_eq!(companions[0].pet_id, "c-1");
+        let _ = std::fs::remove_file(&path);
+    }
+}
